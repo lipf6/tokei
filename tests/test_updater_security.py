@@ -66,7 +66,7 @@ class UpdaterSecurityTests(unittest.TestCase):
             self.assertEqual(metadata["tag_name"], "v1.0.14")
             self.assertEqual(
                 metadata["download_url"],
-                "https://dl.lanshuagent.com/tokei/Tokei-v1.0.14.dmg",
+                "https://github.com/lipf6/tokei/releases/download/v1.0.14/Tokei.dmg",
             )
             self.assertEqual(metadata["sha256"], hashlib.sha256(b"test-dmg").hexdigest())
 

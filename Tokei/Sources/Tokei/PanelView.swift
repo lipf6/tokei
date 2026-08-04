@@ -2004,7 +2004,7 @@ struct PanelView: View {
             }
             Spacer()
             Button {
-                NSWorkspace.shared.open(URL(string: "https://github.com/cclank/tokei")!)
+                NSWorkspace.shared.open(URL(string: "https://github.com/lipf6/tokei")!)
             } label: {
                 GitHubIcon(size: 13)
                     .foregroundStyle(Theme.tTertiary)
@@ -2306,10 +2306,10 @@ struct PanelView: View {
         return lines.joined(separator: "\n")
     }
 
-    static let buildVersion = "2026.0615"
+    static let buildVersion = "2026.0804"
 
     static var skillPath: String {
-        return "https://raw.githubusercontent.com/cclank/tokei/main/skills/tokei-setup.md"
+        return "https://raw.githubusercontent.com/lipf6/tokei/main/skills/tokei-setup.md"
     }
 
     static func gitRemoteUrl(_ dir: String) -> String {
@@ -2344,7 +2344,7 @@ struct PanelView: View {
             -c core.fsmonitor=false \
             clone \(quotedRemote) ~/.tokei/sync
         fi
-        curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
+        curl -fsSL https://raw.githubusercontent.com/lipf6/tokei/main/usage.30s.py -o ~/.tokei/usage.30s.py
         cat > ~/.tokei/config.json <<JSON
         {"sync_dir":"~/.tokei/sync","device_id":"$(hostname -s)","auto_sync":true,"sync_interval":30}
         JSON

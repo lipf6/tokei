@@ -3,8 +3,8 @@
   <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 5.9+">
   <img src="https://img.shields.io/badge/python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License">
-  <a href="https://github.com/cclank/tokei/stargazers"><img src="https://img.shields.io/github/stars/cclank/tokei?style=flat-square&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/cclank/tokei/releases"><img src="https://img.shields.io/github/v/release/cclank/tokei?style=flat-square&color=blue" alt="Release"></a>
+  <a href="https://github.com/lipf6/tokei/stargazers"><img src="https://img.shields.io/github/stars/lipf6/tokei?style=flat-square&color=yellow" alt="Stars"></a>
+  <a href="https://github.com/lipf6/tokei/releases"><img src="https://img.shields.io/github/v/release/lipf6/tokei?style=flat-square&color=blue" alt="Release"></a>
 </p>
 
 <h1 align="center">⏱ Tokei 知度</h1>
@@ -12,7 +12,7 @@
 <p align="center">
   <strong>macOS 菜单栏 AI 编程用量监控</strong><br>
   <sub>了然于心，掌控全局。</sub><br><br>
-  <a href="https://tokei.lanshuagent.com">🌐 官网</a> · <a href="https://github.com/cclank/tokei/releases/latest">⬇️ 下载</a> · <a href="#english">English</a>
+  <a href="https://tokei.lanshuagent.com">🌐 原项目官网</a> · <a href="https://github.com/lipf6/tokei/releases/latest">⬇️ 下载 Kimi 版</a> · <a href="#english">English</a>
 </p>
 
 ---
@@ -88,7 +88,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编�
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/cclank/tokei/releases/latest) 下载最新 DMG
+1. 从 [GitHub Releases](https://github.com/lipf6/tokei/releases/latest) 下载最新 DMG
 2. 打开 DMG，将 Tokei.app 拖入 Applications 文件夹
 3. 首次打开如被 macOS 拦截，在终端运行：`sudo xattr -rd com.apple.quarantine /Applications/Tokei.app`
 4. 打开 Tokei 即可
@@ -97,7 +97,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编�
 <summary>从源码构建</summary>
 
 ```bash
-git clone https://github.com/cclank/tokei.git
+git clone https://github.com/lipf6/tokei.git
 cd tokei/Tokei
 bash package.sh
 open Tokei.app
@@ -114,7 +114,7 @@ Tokei 支持通过私有 Git 仓库在多台机器间同步用量数据。
 
 ```bash
 git clone <你的私有仓库> ~/.tokei/sync
-curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
+curl -fsSL https://raw.githubusercontent.com/lipf6/tokei/main/usage.30s.py -o ~/.tokei/usage.30s.py
 echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'","auto_sync":true,"sync_interval":30}' > ~/.tokei/config.json
 cat > ~/.tokei/tokei-sync.sh <<'SH'
 #!/bin/bash
@@ -187,6 +187,12 @@ chmod +x ~/.tokei/tokei-sync.sh
 > CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——Token 级分析、成本趋势、项目维度拆分、跨设备同步——全部无需登录。
 
 ## 更新日志
+
+### v1.0.22
+
+- feat: 支持 Kimi Code 本地 Token、缓存 Token、模型、会话和项目统计
+- feat: Kimi Code 纳入日报、年度回顾、项目轨迹和多设备汇总
+- chore: 更新源和下载入口切换到 `lipf6/tokei`
 
 ### v1.0.19
 
