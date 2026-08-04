@@ -374,6 +374,7 @@ final class SyncManager {
             mergeRanges(&u.workbuddy.ranges, peer.usage.workbuddy.ranges, pairs)
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
+            mergeRanges(&u.kimi.ranges, peer.usage.kimi.ranges, pairs)
         }
         return u
     }

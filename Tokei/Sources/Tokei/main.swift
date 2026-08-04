@@ -310,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
                     let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
                     let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
+                    let showK = ud.object(forKey: "showKimi") as? Bool ?? true
                     let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
                     let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
                     let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
@@ -320,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                     if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
+                    if showK { let r = u.kimi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                     if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
                     if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }

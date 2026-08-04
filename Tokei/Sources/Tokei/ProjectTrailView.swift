@@ -255,6 +255,7 @@ struct ProjectTrailView: View {
         case "mimocode": return Theme.mimocode
         case "pi": return Theme.pi
         case "workbuddy": return Theme.workbuddy
+        case "kimi": return Theme.kimi
         default: return Theme.tTertiary
         }
     }

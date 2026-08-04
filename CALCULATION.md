@@ -19,6 +19,7 @@ Tokei 读取本地 AI CLI 工具的日志,统计 token 用量与成本。所有�
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` | JSONL, `message.usage` / `providerData.usage` |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `~/.local/share/opencode/storage/message/ses_*/msg_*.json` | SQLite/JSON, `tokens` + `cost` |
 | Qwen Code | `${QWEN_RUNTIME_DIR:-~/.qwen}/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` | JSONL,逐请求记录 + 会话汇总 |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/**/agents/*/wire.jsonl` | JSONL,顶层 `usage.record` |
 
 ---
 
@@ -100,6 +101,16 @@ Tokei 优先读取逐请求日志以获得进行中会话和小时分布。旧�
 按 `sessionId` 取最后一份快照,用于补齐逐请求日志出现前的历史。同一会话同时存在两种来源时,
 逐请求日志优先,避免重复累计。
 
+**Kimi Code** — `usage.record.usage` 字段独立:
+- 输入 = `inputOther`
+- 输出 = `output`
+- 缓存读 = `inputCacheRead`
+- 缓存写 = `inputCacheCreation`
+- 推理 = `0`（本地记录没有独立推理字段）
+
+Tokei 扫描同一会话下全部 `agents/*/wire.jsonl`,按根 `sessionId` 去重会话数。
+`context.append_loop_event` 中嵌套的用量是同一次调用的副本,不会再次累计。
+
 **Grok Build** — `unified.jsonl` 中每条带 token 字段的 `shell.turn.inference_done` 代表一次模型调用：
 - 输入 = `prompt_tokens - cached_prompt_tokens`
 - 缓存读 = `cached_prompt_tokens`
@@ -123,7 +134,7 @@ Dashboard、Wrapped 或项目 token 总量。
 
 两种公式,取决于 `input` 是否包含缓存:
 
-### Claude / Grok Build / Hermes / Pi / WorkBuddy / OpenCode / Qwen Code(input 不含缓存)
+### Claude / Grok Build / Hermes / Pi / WorkBuddy / OpenCode / Qwen Code / Kimi Code(input 不含缓存)
 
 ```
 hit% = cache_read / (cache_read + cache_write + input) × 100
@@ -222,6 +233,10 @@ cost = non_cached_input/1M × price_in
 ### Pi Coding Agent CLI / OpenCode 成本
 
 Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 优先读取 SQLite `message.data` 中的 `cost` 字段，旧版 JSON 文件同口径。若 Pi 成本字段缺失，或 OpenCode 成本为 0 且模型能匹配价格表，则按统一价格表用 input/output/cache_read/cache_write 回退估算。
+
+### Kimi Code 成本
+
+`kimi-code/k3` 当前没有可核实的 API 等价价格映射。第一版仅统计 Token、缓存、模型、会话和项目，成本固定为 `0`，不使用未知模型的通用兜底价格。
 
 ### Grok Build / Qoder / OpenClaw
 

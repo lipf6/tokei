@@ -202,6 +202,7 @@ struct DashboardView: View {
         case "workbuddy": return Theme.workbuddy
         case "opencode": return Theme.opencode
         case "qwencode": return Theme.qwencode
+        case "kimi": return Theme.kimi
         default: return Theme.claude
         }
     }
@@ -881,6 +882,7 @@ struct DashboardView: View {
         appendTokenModels(usage.workbuddy.ranges.get(key).models, tool: "workbuddy", suffix: "WorkBuddy", to: &out)
         appendTokenModels(usage.opencode.ranges.get(key).models, tool: "opencode", suffix: "OpenCode", to: &out)
         appendTokenModels(usage.qwencode.ranges.get(key).models, tool: "qwencode", suffix: "Qwen Code", to: &out)
+        appendTokenModels(usage.kimi.ranges.get(key).models, tool: "kimi", suffix: "Kimi Code", to: &out)
 
         return out.sorted {
             if ($0.tokens ?? 0) != ($1.tokens ?? 0) { return ($0.tokens ?? 0) > ($1.tokens ?? 0) }
@@ -936,6 +938,7 @@ struct DashboardView: View {
             + tokenUsageTotal(usage.workbuddy.ranges.get(key))
             + tokenUsageTotal(usage.opencode.ranges.get(key))
             + tokenUsageTotal(usage.qwencode.ranges.get(key))
+            + tokenUsageTotal(usage.kimi.ranges.get(key))
     }
 
     static func usageTotalCost(_ usage: Usage, _ key: RangeKey) -> Double {
@@ -950,6 +953,7 @@ struct DashboardView: View {
             + usage.workbuddy.ranges.get(key).cost
             + usage.opencode.ranges.get(key).cost
             + usage.qwencode.ranges.get(key).cost
+            + usage.kimi.ranges.get(key).cost
     }
 
     static func tokenUsageTotal(_ r: TokenUsageRange) -> Int {
