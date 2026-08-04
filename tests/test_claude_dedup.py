@@ -8,13 +8,14 @@ from test_codex_limits import USAGE
 
 
 def assistant(message_id, input_tokens, output_tokens=0, request_id=None, event_id=None,
-              sidechain=False, timestamp=None):
+              sidechain=False, timestamp=None, entrypoint="cli"):
     record = {
         "type": "assistant",
         "timestamp": (timestamp or datetime.now().astimezone()).isoformat(),
         "uuid": event_id,
         "requestId": request_id,
         "isSidechain": sidechain,
+        "entrypoint": entrypoint,
         "cwd": "/tmp/claude-project",
         "message": {
             "id": message_id,
@@ -90,6 +91,12 @@ class ClaudeDedupTests(unittest.TestCase):
         ]
         result, _ = self.scan({"project/session.jsonl": records})
         self.assertEqual(result["ranges"]["all"]["in"], 60)
+
+    def test_sdk_cli_transcript_is_counted_as_claude_code_usage(self):
+        records = [assistant("sdk-msg", 14000, entrypoint="sdk-cli")]
+        result, _ = self.scan({"project/session.jsonl": records})
+        self.assertEqual(result["ranges"]["today"]["in"], 14000)
+        self.assertEqual(result["ranges"]["all"]["in"], 14000)
 
 
 if __name__ == "__main__":

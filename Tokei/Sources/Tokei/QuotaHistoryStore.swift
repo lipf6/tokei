@@ -14,10 +14,60 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
     var claudeWeekRemaining: Double?
     var claudeFableWeekRemaining: Double?
     var codexWeekRemaining: Double?
+    var kimiFiveHourRemaining: Double?
+    var kimiWeekRemaining: Double?
     var claudeActivity: [QuotaModelActivity] = []
     var codexActivity: [QuotaModelActivity] = []
+    var kimiActivity: [QuotaModelActivity] = []
 
     var id: Int { timestamp }
+
+    private enum CodingKeys: String, CodingKey {
+        case timestamp, claudeFiveHourRemaining, claudeWeekRemaining
+        case claudeFableWeekRemaining, codexWeekRemaining
+        case kimiFiveHourRemaining, kimiWeekRemaining
+        case claudeActivity, codexActivity, kimiActivity
+    }
+
+    init(
+        timestamp: Int,
+        claudeFiveHourRemaining: Double?,
+        claudeWeekRemaining: Double?,
+        claudeFableWeekRemaining: Double?,
+        codexWeekRemaining: Double?,
+        kimiFiveHourRemaining: Double? = nil,
+        kimiWeekRemaining: Double? = nil,
+        claudeActivity: [QuotaModelActivity] = [],
+        codexActivity: [QuotaModelActivity] = [],
+        kimiActivity: [QuotaModelActivity] = []
+    ) {
+        self.timestamp = timestamp
+        self.claudeFiveHourRemaining = claudeFiveHourRemaining
+        self.claudeWeekRemaining = claudeWeekRemaining
+        self.claudeFableWeekRemaining = claudeFableWeekRemaining
+        self.codexWeekRemaining = codexWeekRemaining
+        self.kimiFiveHourRemaining = kimiFiveHourRemaining
+        self.kimiWeekRemaining = kimiWeekRemaining
+        self.claudeActivity = claudeActivity
+        self.codexActivity = codexActivity
+        self.kimiActivity = kimiActivity
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            timestamp: try container.decode(Int.self, forKey: .timestamp),
+            claudeFiveHourRemaining: try container.decodeIfPresent(Double.self, forKey: .claudeFiveHourRemaining),
+            claudeWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .claudeWeekRemaining),
+            claudeFableWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .claudeFableWeekRemaining),
+            codexWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .codexWeekRemaining),
+            kimiFiveHourRemaining: try container.decodeIfPresent(Double.self, forKey: .kimiFiveHourRemaining),
+            kimiWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .kimiWeekRemaining),
+            claudeActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .claudeActivity) ?? [],
+            codexActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .codexActivity) ?? [],
+            kimiActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .kimiActivity) ?? []
+        )
+    }
 }
 
 struct QuotaCapture {
@@ -25,23 +75,32 @@ struct QuotaCapture {
     var claudeWeekRemaining: Double?
     var claudeFableWeekRemaining: Double?
     var codexWeekRemaining: Double?
+    var kimiFiveHourRemaining: Double?
+    var kimiWeekRemaining: Double?
     var claudeModelTotals: [String: Int]
     var codexModelTotals: [String: Int]
+    var kimiModelTotals: [String: Int]
 
     init(
         claudeFiveHourRemaining: Double? = nil,
         claudeWeekRemaining: Double? = nil,
         claudeFableWeekRemaining: Double? = nil,
         codexWeekRemaining: Double? = nil,
+        kimiFiveHourRemaining: Double? = nil,
+        kimiWeekRemaining: Double? = nil,
         claudeModelTotals: [String: Int] = [:],
-        codexModelTotals: [String: Int] = [:]
+        codexModelTotals: [String: Int] = [:],
+        kimiModelTotals: [String: Int] = [:]
     ) {
         self.claudeFiveHourRemaining = claudeFiveHourRemaining
         self.claudeWeekRemaining = claudeWeekRemaining
         self.claudeFableWeekRemaining = claudeFableWeekRemaining
         self.codexWeekRemaining = codexWeekRemaining
+        self.kimiFiveHourRemaining = kimiFiveHourRemaining
+        self.kimiWeekRemaining = kimiWeekRemaining
         self.claudeModelTotals = claudeModelTotals
         self.codexModelTotals = codexModelTotals
+        self.kimiModelTotals = kimiModelTotals
     }
 }
 
@@ -50,10 +109,36 @@ private struct QuotaHistoryState: Codable {
     var points: [QuotaHistoryPoint] = []
     var lastClaudeModelTotals: [String: Int] = [:]
     var lastCodexModelTotals: [String: Int] = [:]
+    var lastKimiModelTotals: [String: Int] = [:]
     var hasClaudeBaseline = false
     var hasCodexBaseline = false
+    var hasKimiBaseline = false
     var claudeBaselineDay: Int?
     var codexBaselineDay: Int?
+    var kimiBaselineDay: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case version, points, lastClaudeModelTotals, lastCodexModelTotals, lastKimiModelTotals
+        case hasClaudeBaseline, hasCodexBaseline, hasKimiBaseline
+        case claudeBaselineDay, codexBaselineDay, kimiBaselineDay
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        points = try container.decodeIfPresent([QuotaHistoryPoint].self, forKey: .points) ?? []
+        lastClaudeModelTotals = try container.decodeIfPresent([String: Int].self, forKey: .lastClaudeModelTotals) ?? [:]
+        lastCodexModelTotals = try container.decodeIfPresent([String: Int].self, forKey: .lastCodexModelTotals) ?? [:]
+        lastKimiModelTotals = try container.decodeIfPresent([String: Int].self, forKey: .lastKimiModelTotals) ?? [:]
+        hasClaudeBaseline = try container.decodeIfPresent(Bool.self, forKey: .hasClaudeBaseline) ?? false
+        hasCodexBaseline = try container.decodeIfPresent(Bool.self, forKey: .hasCodexBaseline) ?? false
+        hasKimiBaseline = try container.decodeIfPresent(Bool.self, forKey: .hasKimiBaseline) ?? false
+        claudeBaselineDay = try container.decodeIfPresent(Int.self, forKey: .claudeBaselineDay)
+        codexBaselineDay = try container.decodeIfPresent(Int.self, forKey: .codexBaselineDay)
+        kimiBaselineDay = try container.decodeIfPresent(Int.self, forKey: .kimiBaselineDay)
+    }
 }
 
 final class QuotaHistoryStore: ObservableObject {
@@ -100,6 +185,12 @@ final class QuotaHistoryStore: ObservableObject {
             baselineDay: state.codexBaselineDay,
             currentDay: day
         )
+        let kimiBaseline = prepareBaseline(
+            previous: state.lastKimiModelTotals,
+            hasBaseline: state.hasKimiBaseline,
+            baselineDay: state.kimiBaselineDay,
+            currentDay: day
+        )
         let claudeActivity = activity(
             current: capture.claudeModelTotals,
             previous: claudeBaseline.previous,
@@ -109,6 +200,11 @@ final class QuotaHistoryStore: ObservableObject {
             current: capture.codexModelTotals,
             previous: codexBaseline.previous,
             hasBaseline: codexBaseline.hasBaseline
+        )
+        let kimiActivity = activity(
+            current: capture.kimiModelTotals,
+            previous: kimiBaseline.previous,
+            hasBaseline: kimiBaseline.hasBaseline
         )
 
         let nextClaudeBaseline = updatedBaseline(
@@ -131,22 +227,38 @@ final class QuotaHistoryStore: ObservableObject {
         state.hasCodexBaseline = nextCodexBaseline.hasBaseline
         state.codexBaselineDay = nextCodexBaseline.day
 
+        let nextKimiBaseline = updatedBaseline(
+            current: capture.kimiModelTotals,
+            prepared: kimiBaseline,
+            existingDay: state.kimiBaselineDay,
+            currentDay: day
+        )
+        state.lastKimiModelTotals = nextKimiBaseline.totals
+        state.hasKimiBaseline = nextKimiBaseline.hasBaseline
+        state.kimiBaselineDay = nextKimiBaseline.day
+
         let incoming = QuotaHistoryPoint(
             timestamp: minute,
             claudeFiveHourRemaining: normalized(capture.claudeFiveHourRemaining),
             claudeWeekRemaining: normalized(capture.claudeWeekRemaining),
             claudeFableWeekRemaining: normalized(capture.claudeFableWeekRemaining),
             codexWeekRemaining: normalized(capture.codexWeekRemaining),
+            kimiFiveHourRemaining: normalized(capture.kimiFiveHourRemaining),
+            kimiWeekRemaining: normalized(capture.kimiWeekRemaining),
             claudeActivity: claudeActivity,
-            codexActivity: codexActivity
+            codexActivity: codexActivity,
+            kimiActivity: kimiActivity
         )
 
         let hasUsefulData = incoming.claudeFiveHourRemaining != nil ||
             incoming.claudeWeekRemaining != nil ||
             incoming.claudeFableWeekRemaining != nil ||
             incoming.codexWeekRemaining != nil ||
+            incoming.kimiFiveHourRemaining != nil ||
+            incoming.kimiWeekRemaining != nil ||
             !incoming.claudeActivity.isEmpty ||
-            !incoming.codexActivity.isEmpty
+            !incoming.codexActivity.isEmpty ||
+            !incoming.kimiActivity.isEmpty
 
         if hasUsefulData {
             if let lastIndex = points.indices.last, points[lastIndex].timestamp == minute {
@@ -161,7 +273,7 @@ final class QuotaHistoryStore: ObservableObject {
             }
         }
 
-        if changed || nextClaudeBaseline.changed || nextCodexBaseline.changed {
+        if changed || nextClaudeBaseline.changed || nextCodexBaseline.changed || nextKimiBaseline.changed {
             state.points = points
             saveState()
         }
@@ -271,8 +383,13 @@ final class QuotaHistoryStore: ObservableObject {
             incoming.claudeFableWeekRemaining ?? existing.claudeFableWeekRemaining
         merged.codexWeekRemaining =
             incoming.codexWeekRemaining ?? existing.codexWeekRemaining
+        merged.kimiFiveHourRemaining =
+            incoming.kimiFiveHourRemaining ?? existing.kimiFiveHourRemaining
+        merged.kimiWeekRemaining =
+            incoming.kimiWeekRemaining ?? existing.kimiWeekRemaining
         merged.claudeActivity = mergeActivity(existing.claudeActivity, incoming.claudeActivity)
         merged.codexActivity = mergeActivity(existing.codexActivity, incoming.codexActivity)
+        merged.kimiActivity = mergeActivity(existing.kimiActivity, incoming.kimiActivity)
         return merged
     }
 

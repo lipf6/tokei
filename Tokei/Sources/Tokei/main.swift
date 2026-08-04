@@ -121,6 +121,15 @@ final class Store: ObservableObject {
             totals[model.name, default: 0] +=
                 model.in + model.out + model.cr + model.cw + model.reason
         }
+        let kimiRange = usage.kimi.ranges.get(.today)
+        let kimiModels = kimiRange.models.reduce(into: [String: Int]()) { totals, model in
+            guard model.name != "合成" else { return }
+            totals[model.name, default: 0] +=
+                model.in + model.out + model.cr + model.cw + model.reason
+        }
+        let kimiFiveHour = usage.kimi.limits.first {
+            $0.duration == 5 && $0.unit == "hour"
+        }
         quotaHistory.record(QuotaCapture(
             claudeFiveHourRemaining: usage.claude.q5_stale == true
                 ? nil : usage.claude.q5.map { 100 - $0 },
@@ -129,8 +138,13 @@ final class Store: ObservableObject {
             claudeFableWeekRemaining: usage.claude.qf_stale == true
                 ? nil : usage.claude.qf.map { 100 - $0 },
             codexWeekRemaining: usage.codex.pw.map { 100 - $0 },
+            kimiFiveHourRemaining: usage.kimi.q_stale == true
+                ? nil : kimiFiveHour?.usedPercent.map { 100 - $0 },
+            kimiWeekRemaining: usage.kimi.q_stale == true
+                ? nil : usage.kimi.weekly?.usedPercent.map { 100 - $0 },
             claudeModelTotals: claudeModels,
-            codexModelTotals: codexModels
+            codexModelTotals: codexModels,
+            kimiModelTotals: kimiModels
         ))
     }
 

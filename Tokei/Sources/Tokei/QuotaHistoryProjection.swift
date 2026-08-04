@@ -3,6 +3,7 @@ import Foundation
 enum QuotaHistoryTool: String, CaseIterable, Identifiable {
     case claude = "Claude"
     case codex = "Codex"
+    case kimi = "Kimi Code"
 
     var id: String { rawValue }
 
@@ -12,6 +13,8 @@ enum QuotaHistoryTool: String, CaseIterable, Identifiable {
             return ["5 小时", "周 · 全部", "周 · Fable"]
         case .codex:
             return ["周"]
+        case .kimi:
+            return ["周", "5 小时"]
         }
     }
 }
@@ -230,7 +233,11 @@ struct QuotaHistoryProjection {
         for point: QuotaHistoryPoint,
         tool: QuotaHistoryTool
     ) -> [QuotaModelActivity] {
-        tool == .claude ? point.claudeActivity : point.codexActivity
+        switch tool {
+        case .claude: return point.claudeActivity
+        case .codex: return point.codexActivity
+        case .kimi: return point.kimiActivity
+        }
     }
 
     private static func activity(
@@ -257,6 +264,10 @@ struct QuotaHistoryProjection {
             return point.claudeFableWeekRemaining
         case (.codex, "周"):
             return point.codexWeekRemaining
+        case (.kimi, "周"):
+            return point.kimiWeekRemaining
+        case (.kimi, "5 小时"):
+            return point.kimiFiveHourRemaining
         default:
             return nil
         }
