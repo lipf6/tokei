@@ -659,6 +659,64 @@ struct TokenUsageRanges: Codable {
 }
 struct TokenUsageStat: Codable { var ranges: TokenUsageRanges }
 
+struct KimiQuotaRow: Codable, Identifiable {
+    var name: String?
+    var duration: Int?
+    var unit: String?
+    var used: Double
+    var limit: Double
+    var reset_at: Int?
+
+    var id: String { "\(name ?? "quota"):\(duration ?? 0):\(unit ?? "")" }
+    var usedPercent: Double? {
+        guard limit > 0 else { return nil }
+        return min(100, max(0, used / limit * 100))
+    }
+}
+
+struct KimiExtraUsage: Codable {
+    var balance_cents: Int
+    var total_cents: Int
+    var monthly_limit_enabled: Bool
+    var monthly_limit_cents: Int
+    var monthly_used_cents: Int
+    var currency: String
+}
+
+struct KimiStat: Codable {
+    var ranges: TokenUsageRanges
+    var weekly: KimiQuotaRow?
+    var limits: [KimiQuotaRow]
+    var extra_usage: KimiExtraUsage?
+    var q_updated: Int?
+    var q_source: String?
+    var q_stale: Bool?
+    var q_error: String?
+
+    init(ranges: TokenUsageRanges) {
+        self.ranges = ranges
+        weekly = nil
+        limits = []
+        extra_usage = nil
+        q_updated = nil
+        q_source = nil
+        q_stale = nil
+        q_error = nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ranges = try c.decodeIfPresent(TokenUsageRanges.self, forKey: .ranges) ?? .empty
+        weekly = try c.decodeIfPresent(KimiQuotaRow.self, forKey: .weekly)
+        limits = try c.decodeIfPresent([KimiQuotaRow].self, forKey: .limits) ?? []
+        extra_usage = try c.decodeIfPresent(KimiExtraUsage.self, forKey: .extra_usage)
+        q_updated = try c.decodeIfPresent(Int.self, forKey: .q_updated)
+        q_source = try c.decodeIfPresent(String.self, forKey: .q_source)
+        q_stale = try c.decodeIfPresent(Bool.self, forKey: .q_stale)
+        q_error = try c.decodeIfPresent(String.self, forKey: .q_error)
+    }
+}
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
@@ -675,7 +733,7 @@ struct Usage: Codable {
     var workbuddy: TokenUsageStat
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
-    var kimi: TokenUsageStat
+    var kimi: KimiStat
 
     enum CodingKeys: String, CodingKey {
         case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
@@ -703,7 +761,7 @@ struct Usage: Codable {
         workbuddy = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddy) ?? TokenUsageStat(ranges: .empty)
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
-        kimi = try c.decodeIfPresent(TokenUsageStat.self, forKey: .kimi) ?? TokenUsageStat(ranges: .empty)
+        kimi = try c.decodeIfPresent(KimiStat.self, forKey: .kimi) ?? KimiStat(ranges: .empty)
     }
 }
 

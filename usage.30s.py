@@ -5,7 +5,7 @@
 # <bitbar.desc>本地 AI coding tools token / 缓存命中 / 花费 / 额度</bitbar.desc>
 # <swiftbar.runInBash>false</swiftbar.runInBash>
 #
-# 数据主要读自本地会话日志,不改动任何 CLI；Codex 额度会短缓存查询官方 live usage。
+# 数据主要读自本地会话日志；Codex/Kimi 额度会短缓存查询官方接口，Kimi 可按官方协议续期 OAuth。
 # Grok 额度默认只读本地 unified.jsonl billing 日志；实时账单接口需显式开启
 # (config grok_live_quota_enabled 或 TOKEI_GROK_LIVE_QUOTA=1)。
 # 仅 --update-prices 显式联网更新价格表:
@@ -22,7 +22,13 @@ import glob
 import hashlib
 import json
 import math
+import platform
 import re
+import socket
+import threading
+import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, date
 from pathlib import Path
 
@@ -126,6 +132,9 @@ QWEN_CODE_DIR = os.path.abspath(os.path.expanduser(
 KIMI_CODE_HOME = os.path.abspath(os.path.expanduser(
     os.environ.get("KIMI_CODE_HOME", os.path.join(HOME, ".kimi-code"))))
 KIMI_SESSION_INDEX = os.path.join(KIMI_CODE_HOME, "session_index.jsonl")
+KIMI_CREDENTIALS = os.path.join(KIMI_CODE_HOME, "credentials", "kimi-code.json")
+KIMI_DEVICE_ID = os.path.join(KIMI_CODE_HOME, "device_id")
+KIMI_OAUTH_LOCK_TARGET = os.path.join(KIMI_CODE_HOME, "oauth", "kimi-code")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -150,6 +159,7 @@ CODEX_QUOTA_CACHE = _writable_path("codex_quota_cache.json")
 CODEX_RESET_CARDS_CACHE = _writable_path("codex_reset_cards_cache.json")
 CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
 GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
+KIMI_QUOTA_CACHE = _writable_path("kimi_quota_cache.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -4884,6 +4894,425 @@ def scan_qwencode(bounds, cache):
 
 
 # ---------- Kimi Code ----------
+_KIMI_QUOTA_TTL = 5 * 60
+_KIMI_QUOTA_FALLBACK_TTL = 24 * 3600
+_KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
+_KIMI_OAUTH_TOKEN_URL = "https://auth.kimi.com/api/oauth/token"
+_KIMI_OAUTH_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+_KIMI_MAX_RESPONSE_BYTES = 256 * 1024
+
+
+def _kimi_int(value):
+    try:
+        number = float(value)
+        return int(number) if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _kimi_reset_epoch(value):
+    if not isinstance(value, str) or not value:
+        return None
+    parsed = parse_ts(value)
+    return int(parsed.timestamp()) if parsed is not None else None
+
+
+def _kimi_usage_row(raw, name=None, window=None):
+    if not isinstance(raw, dict):
+        return None
+    used = _kimi_int(raw.get("used"))
+    limit = _kimi_int(raw.get("limit"))
+    if used is None and limit is None:
+        return None
+    row = {
+        "name": name or raw.get("name"),
+        "used": used or 0,
+        "limit": limit or 0,
+        "reset_at": _kimi_reset_epoch(raw.get("resetTime")),
+    }
+    if window:
+        row.update(window)
+    return row
+
+
+def _kimi_usage_window(raw):
+    if not isinstance(raw, dict):
+        return None
+    duration = _kimi_int(raw.get("duration"))
+    units = {
+        "TIME_UNIT_MINUTE": "minute",
+        "TIME_UNIT_HOUR": "hour",
+        "TIME_UNIT_DAY": "day",
+        "TIME_UNIT_WEEK": "week",
+    }
+    unit = units.get(raw.get("timeUnit"))
+    if duration is None or unit is None:
+        return None
+    if unit == "minute" and duration >= 60 and duration % 60 == 0:
+        duration //= 60
+        unit = "hour"
+    return {"duration": duration, "unit": unit}
+
+
+def _kimi_money(raw):
+    if not isinstance(raw, dict):
+        return None
+    cents = _kimi_int(raw.get("priceInCents"))
+    if cents is None:
+        return None
+    return {"cents": cents, "currency": str(raw.get("currency") or "")}
+
+
+def _kimi_booster_wallet(raw):
+    if not isinstance(raw, dict) or not isinstance(raw.get("balance"), dict):
+        return None
+    balance = raw["balance"]
+    amount = _kimi_int(balance.get("amount"))
+    if balance.get("type") != "BOOSTER" or amount is None or amount <= 0:
+        return None
+
+    def fixed_point_cents(value):
+        if value is None:
+            return 0
+        cents = value / 1_000_000
+        return 1 if 0 < cents < 1 else round(cents)
+
+    monthly_limit = _kimi_money(raw.get("monthlyChargeLimit"))
+    monthly_used = _kimi_money(raw.get("monthlyUsed"))
+    currency = ((monthly_limit or {}).get("currency")
+                or (monthly_used or {}).get("currency") or "USD")
+    return {
+        "balance_cents": fixed_point_cents(_kimi_int(balance.get("amountLeft"))),
+        "total_cents": fixed_point_cents(amount),
+        "monthly_limit_enabled": raw.get("monthlyChargeLimitEnabled") is True,
+        "monthly_limit_cents": (monthly_limit or {}).get("cents", 0),
+        "monthly_used_cents": (monthly_used or {}).get("cents", 0),
+        "currency": currency,
+    }
+
+
+def _parse_kimi_usage(payload):
+    if not isinstance(payload, dict):
+        return None
+    weekly = _kimi_usage_row(payload.get("usage"), window={"duration": 1, "unit": "week"})
+    limits = []
+    for item in payload.get("limits") or []:
+        if not isinstance(item, dict):
+            continue
+        row = _kimi_usage_row(
+            item.get("detail"), name=item.get("name"), window=_kimi_usage_window(item.get("window")))
+        if row is not None:
+            limits.append(row)
+    if weekly is None and not limits:
+        return None
+    return {
+        "weekly": weekly,
+        "limits": limits,
+        "extra_usage": _kimi_booster_wallet(payload.get("boosterWallet")),
+    }
+
+
+def _kimi_cached_quota(max_age, stale=False, error=None):
+    cached = _load_json(KIMI_QUOTA_CACHE, {})
+    fetched_at = cached.get("fetched_at")
+    quota = cached.get("quota")
+    if not fetched_at or not isinstance(quota, dict):
+        return None
+    if datetime.now().timestamp() - float(fetched_at) > max_age:
+        return None
+    result = dict(quota)
+    result.update({
+        "updated": int(float(fetched_at)),
+        "source": "cache",
+        "stale": stale,
+    })
+    if error:
+        result["error"] = error
+    return result
+
+
+def _kimi_ascii_header(value, fallback="unknown"):
+    cleaned = "".join(ch for ch in str(value) if " " <= ch <= "~").strip()
+    return cleaned or fallback
+
+
+def _kimi_read_or_create_device_id():
+    try:
+        with open(KIMI_DEVICE_ID, encoding="utf-8") as fh:
+            existing = fh.read().strip()
+        if existing:
+            return existing
+    except OSError:
+        pass
+    device_id = str(uuid.uuid4())
+    os.makedirs(os.path.dirname(KIMI_DEVICE_ID), mode=0o700, exist_ok=True)
+    try:
+        fd = os.open(KIMI_DEVICE_ID, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(device_id)
+            fh.flush()
+            os.fsync(fh.fileno())
+    except FileExistsError:
+        try:
+            with open(KIMI_DEVICE_ID, encoding="utf-8") as fh:
+                return fh.read().strip() or device_id
+        except OSError:
+            pass
+    except OSError:
+        pass
+    return device_id
+
+
+def _kimi_identity_headers():
+    os_version = platform.release()
+    model = f"{platform.system()} {platform.mac_ver()[0] or os_version} {platform.machine()}".strip()
+    return {
+        "User-Agent": "Tokei/1",
+        "X-Msh-Platform": "tokei",
+        "X-Msh-Version": "1",
+        "X-Msh-Device-Name": _kimi_ascii_header(socket.gethostname()),
+        "X-Msh-Device-Model": _kimi_ascii_header(model),
+        "X-Msh-Os-Version": _kimi_ascii_header(os_version),
+        "X-Msh-Device-Id": _kimi_read_or_create_device_id(),
+    }
+
+
+def _kimi_load_credentials():
+    credentials = _load_json(KIMI_CREDENTIALS, {})
+    return credentials if isinstance(credentials, dict) else {}
+
+
+def _kimi_credentials_changed(before, after):
+    return any(before.get(key) != after.get(key)
+               for key in ("access_token", "refresh_token", "expires_at", "expires_in"))
+
+
+def _kimi_needs_refresh(credentials, now=None):
+    now = datetime.now().timestamp() if now is None else now
+    expires_at = _kimi_int(credentials.get("expires_at"))
+    expires_in = _kimi_int(credentials.get("expires_in")) or 0
+    if not credentials.get("access_token") or not expires_at:
+        return True
+    threshold = max(300, expires_in * 0.5) if expires_in > 0 else 300
+    return expires_at - now <= threshold
+
+
+@contextmanager
+def _kimi_refresh_lock():
+    target = KIMI_OAUTH_LOCK_TARGET
+    lock_dir = target + ".lock"
+    os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+    with open(target, "a", encoding="utf-8"):
+        pass
+    acquired = False
+    for _ in range(10):
+        try:
+            os.mkdir(lock_dir, 0o700)
+            acquired = True
+            break
+        except FileExistsError:
+            time.sleep(0.2)
+    if not acquired:
+        raise RuntimeError("oauth_lock_busy")
+
+    stop = threading.Event()
+
+    def heartbeat():
+        while not stop.wait(2):
+            try:
+                os.utime(lock_dir, None)
+            except OSError:
+                return
+
+    worker = threading.Thread(target=heartbeat, daemon=True)
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join(timeout=1)
+        try:
+            os.rmdir(lock_dir)
+        except OSError:
+            pass
+
+
+def _kimi_atomic_write_credentials(credentials):
+    directory = os.path.dirname(KIMI_CREDENTIALS)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="kimi-code.json.tmp.", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(credentials, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, KIMI_CREDENTIALS)
+        os.chmod(KIMI_CREDENTIALS, 0o600)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _kimi_refresh_http(refresh_token):
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    body = urllib.parse.urlencode({
+        "client_id": _KIMI_OAUTH_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+    }).encode("utf-8")
+    request = urllib.request.Request(_KIMI_OAUTH_TOKEN_URL, data=body, method="POST")
+    for key, value in _kimi_identity_headers().items():
+        request.add_header(key, value)
+    request.add_header("Accept", "application/json")
+    request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    opener = urllib.request.build_opener(NoRedirect)
+    try:
+        with opener.open(request, timeout=5) as response:
+            raw = response.read(_KIMI_MAX_RESPONSE_BYTES + 1)
+            status = response.status
+    except urllib.error.HTTPError as error:
+        raw = error.read(_KIMI_MAX_RESPONSE_BYTES + 1)
+        status = error.code
+    if len(raw) > _KIMI_MAX_RESPONSE_BYTES:
+        raise RuntimeError("oauth_response_too_large")
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        payload = {}
+    return status, payload if isinstance(payload, dict) else {}
+
+
+def _kimi_refresh_access_token(refresh_token):
+    last_error = "oauth_refresh_failed"
+    for attempt in range(3):
+        try:
+            status, payload = _kimi_refresh_http(refresh_token)
+        except Exception:
+            status, payload = 0, {}
+        if status == 200:
+            access = payload.get("access_token")
+            rotated_refresh = payload.get("refresh_token")
+            expires_in = _kimi_int(payload.get("expires_in"))
+            if not access or not rotated_refresh or not expires_in or expires_in <= 0:
+                raise RuntimeError("oauth_response_invalid")
+            return {
+                "access_token": access,
+                "refresh_token": rotated_refresh,
+                "expires_at": int(datetime.now().timestamp()) + expires_in,
+                "expires_in": expires_in,
+                "scope": str(payload.get("scope") or ""),
+                "token_type": str(payload.get("token_type") or "Bearer"),
+            }
+        if status in (401, 403) or payload.get("error") == "invalid_grant":
+            raise PermissionError("oauth_unauthorized")
+        last_error = "oauth_unavailable"
+        if status not in (0, 429, 500, 502, 503, 504) or attempt == 2:
+            break
+        time.sleep(2 ** attempt)
+    raise RuntimeError(last_error)
+
+
+def _kimi_ensure_access_token(force=False):
+    initial = _kimi_load_credentials()
+    if not initial.get("access_token") or not initial.get("refresh_token"):
+        raise PermissionError("not_authenticated")
+    if not force and not _kimi_needs_refresh(initial):
+        return initial["access_token"]
+
+    with _kimi_refresh_lock():
+        active = _kimi_load_credentials()
+        if _kimi_credentials_changed(initial, active):
+            if active.get("access_token") and active.get("refresh_token"):
+                return active["access_token"]
+        if not active.get("refresh_token"):
+            raise PermissionError("not_authenticated")
+        if not force and not _kimi_needs_refresh(active):
+            return active["access_token"]
+        try:
+            refreshed = _kimi_refresh_access_token(active["refresh_token"])
+        except PermissionError:
+            time.sleep(0.1)
+            peer = _kimi_load_credentials()
+            if (_kimi_credentials_changed(active, peer) and peer.get("access_token")
+                    and peer.get("refresh_token")):
+                return peer["access_token"]
+            raise
+        _kimi_atomic_write_credentials(refreshed)
+        return refreshed["access_token"]
+
+
+def _kimi_fetch_usage_payload(access_token):
+    import urllib.request
+    from urllib.parse import urlparse
+    request = urllib.request.Request(_KIMI_USAGE_URL)
+    request.add_header("Accept", "application/json")
+    request.add_header("User-Agent", "Tokei")
+    request.add_unredirected_header("Authorization", f"Bearer {access_token}")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        final_url = urlparse(response.geturl())
+        if (final_url.scheme != "https" or final_url.hostname != "api.kimi.com"
+                or final_url.path.rstrip("/") != "/coding/v1/usages"):
+            raise RuntimeError("usage_redirect_rejected")
+        raw = response.read(_KIMI_MAX_RESPONSE_BYTES + 1)
+    if len(raw) > _KIMI_MAX_RESPONSE_BYTES:
+        raise RuntimeError("usage_response_too_large")
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise RuntimeError("usage_response_invalid")
+    return payload
+
+
+def fetch_kimi_quota():
+    env = os.environ.get("TOKEI_KIMI_LIVE_QUOTA")
+    enabled = env == "1" if env in ("0", "1") else \
+        bool(_tokei_config().get("kimi_live_quota_enabled", True))
+    if not enabled:
+        return None
+    cached = _kimi_cached_quota(_KIMI_QUOTA_TTL)
+    if cached:
+        return cached
+    try:
+        token = _kimi_ensure_access_token()
+        try:
+            payload = _kimi_fetch_usage_payload(token)
+        except Exception as error:
+            if getattr(error, "code", None) != 401:
+                raise
+            token = _kimi_ensure_access_token(force=True)
+            payload = _kimi_fetch_usage_payload(token)
+        quota = _parse_kimi_usage(payload)
+        if quota is None:
+            raise RuntimeError("usage_response_invalid")
+        now = int(datetime.now().timestamp())
+        _atomic_write_json(KIMI_QUOTA_CACHE, {"fetched_at": now, "quota": quota})
+        result = dict(quota)
+        result.update({"updated": now, "source": "live", "stale": False})
+        return result
+    except PermissionError as error:
+        fallback = _kimi_cached_quota(
+            _KIMI_QUOTA_FALLBACK_TTL, stale=True, error=str(error))
+        return fallback or {"stale": True, "error": str(error)}
+    except Exception:
+        fallback = _kimi_cached_quota(
+            _KIMI_QUOTA_FALLBACK_TTL, stale=True, error="quota_unavailable")
+        return fallback or {"stale": True, "error": "quota_unavailable"}
+
+
 def _kimi_session_metadata():
     sessions = {}
     try:
@@ -5285,6 +5714,7 @@ def compute():
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
     kimi = _safe_scan("kimi", lambda: scan_kimi(bounds, cache), _empty_kimi, errors)
+    kimi_quota = _safe_scan("kimi_quota", fetch_kimi_quota, lambda: None, errors) or {}
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
     _cache_dashboard_days(cache, _GROK_DAYS_CACHE_KEY, gk.get("days", {}))
     _save_scan_cache(cache)
@@ -5494,6 +5924,13 @@ def compute():
         },
         "kimi": {
             "ranges": kimiranges,
+            "weekly": kimi_quota.get("weekly"),
+            "limits": kimi_quota.get("limits") or [],
+            "extra_usage": kimi_quota.get("extra_usage"),
+            "q_updated": kimi_quota.get("updated"),
+            "q_source": kimi_quota.get("source"),
+            "q_stale": kimi_quota.get("stale"),
+            "q_error": kimi_quota.get("error"),
         },
     }
     if errors:

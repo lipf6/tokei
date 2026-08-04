@@ -60,6 +60,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     case claude
     case codex
     case grok
+    case kimi
 
     var id: String { rawValue }
 
@@ -68,6 +69,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claude: return "Claude"
         case .codex: return "Codex"
         case .grok: return "Grok"
+        case .kimi: return "Kimi"
         }
     }
 
@@ -76,6 +78,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claude: return "menuBarQuotaClaude"
         case .codex: return "menuBarQuotaCodex"
         case .grok: return "menuBarQuotaGrok"
+        case .kimi: return "menuBarQuotaKimi"
         }
     }
 
@@ -83,7 +86,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     var defaultEnabled: Bool {
         switch self {
         case .claude, .codex: return true
-        case .grok: return false
+        case .grok, .kimi: return false
         }
     }
 
@@ -100,6 +103,7 @@ enum MenuBarMetricKind {
     case claude
     case codex
     case grok
+    case kimi
     case total
 }
 
@@ -646,6 +650,7 @@ enum MenuBarTitleRenderer {
         case .claude: return AppDelegate.claudeColor
         case .codex: return AppDelegate.codexColor
         case .grok: return AppDelegate.grokColor
+        case .kimi: return AppDelegate.kimiColor
         case .total: return .secondaryLabelColor
         }
     }
@@ -770,6 +775,7 @@ struct MenuBarStylePreview: View {
         case .claude: return AppDelegate.claudeColor
         case .codex: return AppDelegate.codexColor
         case .grok: return AppDelegate.grokColor
+        case .kimi: return AppDelegate.kimiColor
         case .total: return .secondaryLabelColor
         }
     }
@@ -779,6 +785,7 @@ struct MenuBarStylePreview: View {
         case .claude: return Theme.claude
         case .codex: return Theme.codex
         case .grok: return Theme.grok
+        case .kimi: return Theme.kimi
         case .total: return Theme.tSecondary
         }
     }

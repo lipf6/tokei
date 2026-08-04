@@ -35,7 +35,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编�
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
-| **Kimi Code** | Token（输入/输出/缓存）、模型、会话、项目 |
+| **Kimi Code** | Token（输入/输出/缓存）、模型、会话、项目、周/5 小时额度、Extra Usage |
 | **Qoder** | Token、调用次数、配额 |
 | **QoderWork** | Token、调用次数、配额 |
 
@@ -149,7 +149,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ## 数据来源
 
-所有数据均来自 **本地日志文件**，无网络请求。
+Token、会话和项目统计来自本地日志。Codex、Kimi 等套餐额度会使用对应 CLI 的本地登录态查询官方额度接口，并做短时本地缓存。
 
 | 工具 | 日志路径 |
 |------|----------|
@@ -163,7 +163,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
 | OpenCode | `~/.opencode/sessions/*.json` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
-| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/**/agents/*/wire.jsonl` |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/**/agents/*/wire.jsonl`；额度读取 `credentials/kimi-code.json` 并查询官方 `/usages` |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 | QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 
@@ -180,13 +180,19 @@ chmod +x ~/.tokei/tokei-sync.sh
 | 多设备同步 | ✅ | — |
 | 年度回顾 | ✅ | — |
 | 防休眠 / 久坐提醒 | ✅ | — |
-| 需要联网 | 否 | 是 |
-| 需要登录 | 否 | 是 |
+| 需要联网 | 仅实时额度 | 是 |
+| 需要登录 | 复用对应 CLI 登录态 | 是 |
 | 数据来源 | 本地日志 | 远程 API |
 
 > CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——Token 级分析、成本趋势、项目维度拆分、跨设备同步——全部无需登录。
 
 ## 更新日志
+
+### v1.0.23
+
+- feat: Kimi Code 显示周额度、滚动 5 小时额度、重置时间和 Extra Usage 钱包
+- feat: 按 Kimi Code 官方协议自动续期 OAuth，跨进程加锁并以 `0600` 原子更新凭证
+- privacy: Kimi 额度缓存不保存 access token 或 refresh token；可在设置中关闭，也可设置 `TOKEI_KIMI_LIVE_QUOTA=0`
 
 ### v1.0.22
 

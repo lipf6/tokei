@@ -48,10 +48,13 @@ struct PanelView: View {
     @AppStorage("showKimi") private var showKimi = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
     @AppStorage("grokLiveQuotaEnabled") private var grokLiveQuotaEnabled = false
+    /// 默认开启：复用 Kimi Code 登录态读取官方额度，并按需自动续期。
+    @AppStorage("kimiLiveQuotaEnabled") private var kimiLiveQuotaEnabled = true
     /// 菜单栏额度来源（与显示卡片独立）。Grok 默认关，避免新额度源抢占状态栏。
     @AppStorage(MenuBarQuotaSource.claude.defaultsKey) private var menuBarQuotaClaude = true
     @AppStorage(MenuBarQuotaSource.codex.defaultsKey) private var menuBarQuotaCodex = true
     @AppStorage(MenuBarQuotaSource.grok.defaultsKey) private var menuBarQuotaGrok = false
+    @AppStorage(MenuBarQuotaSource.kimi.defaultsKey) private var menuBarQuotaKimi = false
 
     private var visibleCount: Int {
         [showClaude, showCodex, showGemini, showGrok, showQoder, showQoderWork, showQoderCli, showHermes, showZcode, showMimoCode,
@@ -327,8 +330,10 @@ struct PanelView: View {
                          tint: Theme.opencode, content: AnyView(tokenUsageBlock(title: "OpenCode", or, tint: Theme.opencode, modelsOpen: $openCodeModelsOpen))),
             ToolCardItem(id: "qwencode", name: "Qwen Code", visible: showQwenCode, active: qcr.sessions > 0,
                          tint: Theme.qwencode, content: AnyView(tokenUsageBlock(title: "Qwen Code", qcr, tint: Theme.qwencode, modelsOpen: $qwenCodeModelsOpen))),
-            ToolCardItem(id: "kimi", name: "Kimi Code", visible: showKimi, active: kimir.sessions > 0,
-                         tint: Theme.kimi, content: AnyView(tokenUsageBlock(title: "Kimi Code", kimir, tint: Theme.kimi, modelsOpen: $kimiModelsOpen))),
+            ToolCardItem(id: "kimi", name: "Kimi Code", visible: showKimi,
+                         active: kimir.sessions > 0 || u.kimi.weekly != nil ||
+                             !u.kimi.limits.isEmpty || u.kimi.extra_usage != nil,
+                         tint: Theme.kimi, content: AnyView(kimiBlock(u.kimi, kimir))),
         ]
     }
 
@@ -900,6 +905,96 @@ struct PanelView: View {
                 emptyHint
             }
         }
+    }
+
+    @ViewBuilder
+    func kimiBlock(_ stat: KimiStat, _ r: TokenUsageRange) -> some View {
+        let fiveHour = stat.limits.first { $0.duration == 5 && $0.unit == "hour" }
+        let hasQuota = stat.weekly != nil || fiveHour != nil || stat.extra_usage != nil
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("Kimi Code", tint: Theme.kimi, sessions: r.sessions)
+            if r.sessions > 0 {
+                CostHeadline(value: Fmt.human(r.in + r.out + r.cr + r.cw + r.reason),
+                             caption: "\(sel.label) 总量", tint: Theme.kimi)
+                metricGrid([.init("dollarsign.circle", "≈成本", String(format: "$%.2f", r.cost))],
+                    hit: r.hit, extra: tokenUsageMetrics(r), tint: Theme.kimi)
+                if !r.models.isEmpty {
+                    tokenModelDisclosure(r.models, open: $kimiModelsOpen, tint: Theme.kimi)
+                }
+            } else if !hasQuota {
+                emptyHint
+            }
+            if hasQuota {
+                if r.sessions > 0 { thinDivider }
+                if let weekly = stat.weekly, let used = weekly.usedPercent {
+                    quotaRow(title: "周剩余", pct: 100 - used,
+                             reset: weekly.reset_at, tint: Theme.kimi)
+                }
+                if let fiveHour, let used = fiveHour.usedPercent {
+                    quotaRow(title: "5h 剩余", pct: 100 - used,
+                             reset: fiveHour.reset_at, tint: Theme.kimi)
+                }
+                if let extra = stat.extra_usage {
+                    kimiExtraUsageRow(extra)
+                }
+                kimiQuotaStatus(stat)
+            } else if r.sessions > 0, let error = stat.q_error {
+                thinDivider
+                Label(
+                    error == "not_authenticated" || error == "oauth_unauthorized"
+                        ? "请先在 Kimi Code 完成登录"
+                        : "Kimi 额度接口暂不可用",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(Color.orange.opacity(0.88))
+            }
+        }
+    }
+
+    func kimiExtraUsageRow(_ extra: KimiExtraUsage) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wallet.bifold.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.kimi)
+            Text("Extra Usage")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.tSecondary)
+            Spacer()
+            Text("\(Self.kimiMoney(extra.balance_cents, currency: extra.currency)) / \(Self.kimiMoney(extra.total_cents, currency: extra.currency))")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Theme.tPrimary)
+        }
+        .help(extra.monthly_limit_enabled
+              ? "本月已用 \(Self.kimiMoney(extra.monthly_used_cents, currency: extra.currency))，上限 \(Self.kimiMoney(extra.monthly_limit_cents, currency: extra.currency))"
+              : "Kimi Extra Usage 钱包余额")
+    }
+
+    static func kimiMoney(_ cents: Int, currency: String) -> String {
+        let prefix: String
+        switch currency.uppercased() {
+        case "USD": prefix = "$"
+        case "CNY": prefix = "¥"
+        default: prefix = "\(currency) "
+        }
+        return prefix + String(format: "%.2f", Double(cents) / 100)
+    }
+
+    func kimiQuotaStatus(_ stat: KimiStat) -> some View {
+        let stale = stat.q_stale == true
+        let source = stat.q_source == "live" ? "官方实时接口" : "本地缓存"
+        let updated = stat.q_updated.map { Fmt.reset($0) } ?? "更新时间未知"
+        return HStack(spacing: 5) {
+            Image(systemName: stale ? "exclamationmark.triangle.fill" : "clock")
+                .font(.system(size: 9))
+            Text("额度来源 \(source) · \(updated)")
+                .font(.system(size: 9.5, design: .monospaced))
+            Spacer()
+        }
+        .foregroundStyle(stale ? Color.orange.opacity(0.88) : Theme.tTertiary)
+        .help(stale
+              ? "Kimi 官方额度暂不可用，当前显示最近一次缓存"
+              : "来自 Kimi Code 官方 /usages 接口；所有设备共享同一额度池")
     }
 
     func tokenUsageMetrics(_ r: TokenUsageRange) -> [Metric] {
@@ -1532,6 +1627,7 @@ struct PanelView: View {
                     settingsRow("Claude", tint: Theme.claude, isOn: $menuBarQuotaClaude)
                     settingsRow("Codex", tint: Theme.codex, isOn: $menuBarQuotaCodex)
                     settingsRow("Grok", tint: Theme.grok, isOn: $menuBarQuotaGrok)
+                    settingsRow("Kimi", tint: Theme.kimi, isOn: $menuBarQuotaKimi)
                 }
             }
 
@@ -1629,9 +1725,18 @@ struct PanelView: View {
                 .font(.system(size: 8.5))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+            settingsToggleRow("Kimi 实时额度查询", isOn: $kimiLiveQuotaEnabled)
+            Text("复用 Kimi Code 本地登录态查询官方周额度和 5 小时额度；Token 临近过期时会按官方协议自动续期。额度缓存不保存 Token。")
+                .font(.system(size: 8.5))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .onChange(of: grokLiveQuotaEnabled) { enabled in
             Self.setGrokLiveQuotaEnabled(enabled)
+            store.refresh()
+        }
+        .onChange(of: kimiLiveQuotaEnabled) { enabled in
+            Self.setKimiLiveQuotaEnabled(enabled)
             store.refresh()
         }
     }
@@ -1642,6 +1747,10 @@ struct PanelView: View {
 
     private static func setGrokLiveQuotaEnabled(_ enabled: Bool) {
         SyncManager.setGrokLiveQuotaEnabled(enabled)
+    }
+
+    private static func setKimiLiveQuotaEnabled(_ enabled: Bool) {
+        SyncManager.setKimiLiveQuotaEnabled(enabled)
     }
 
     /// 启动时把 UI 开关(showQoderIde)的当前值落盘到 config.json。
@@ -1656,6 +1765,12 @@ struct PanelView: View {
     static func syncGrokLiveQuotaConfigOnLaunch() {
         let enabled = UserDefaults.standard.object(forKey: "grokLiveQuotaEnabled") as? Bool ?? false
         setGrokLiveQuotaEnabled(enabled)
+    }
+
+    /// 启动时同步 Kimi 实时额度开关（默认开）。
+    static func syncKimiLiveQuotaConfigOnLaunch() {
+        let enabled = UserDefaults.standard.object(forKey: "kimiLiveQuotaEnabled") as? Bool ?? true
+        setKimiLiveQuotaEnabled(enabled)
     }
 
     var settingsPricingSection: some View {
