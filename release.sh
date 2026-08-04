@@ -40,4 +40,4 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 gh release download "$TAG" --repo "$REPO" --pattern Tokei.dmg --dir "$TMP_DIR"
 REMOTE_SHA="$(shasum -a 256 "$TMP_DIR/Tokei.dmg" | awk '{print $1}')"
 [ "$REMOTE_SHA" = "$LOCAL_SHA" ] || { echo "❌ GitHub Release DMG 校验失败"; exit 1; }
-echo "✅ $TAG 已发布到 $REPO，DMG sha256 校验一致"
+echo "✅ $TAG 已发布到 ${REPO}，DMG sha256 校验一致"
