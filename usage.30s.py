@@ -5012,13 +5012,25 @@ def _parse_kimi_usage(payload):
     }
 
 
+def _kimi_quota_reset_reached(quota, now):
+    rows = [quota.get("weekly")] + list(quota.get("limits") or [])
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        reset_at = _kimi_int(row.get("reset_at"))
+        if reset_at is not None and reset_at <= now:
+            return True
+    return False
+
+
 def _kimi_cached_quota(max_age, stale=False, error=None):
     cached = _load_json(KIMI_QUOTA_CACHE, {})
     fetched_at = cached.get("fetched_at")
     quota = cached.get("quota")
     if not fetched_at or not isinstance(quota, dict):
         return None
-    if datetime.now().timestamp() - float(fetched_at) > max_age:
+    now = datetime.now().timestamp()
+    if now - float(fetched_at) > max_age or _kimi_quota_reset_reached(quota, now):
         return None
     result = dict(quota)
     result.update({
@@ -5277,15 +5289,16 @@ def _kimi_fetch_usage_payload(access_token):
     return payload
 
 
-def fetch_kimi_quota():
+def fetch_kimi_quota(force=False):
     env = os.environ.get("TOKEI_KIMI_LIVE_QUOTA")
     enabled = env == "1" if env in ("0", "1") else \
         bool(_tokei_config().get("kimi_live_quota_enabled", True))
     if not enabled:
         return None
-    cached = _kimi_cached_quota(_KIMI_QUOTA_TTL)
-    if cached:
-        return cached
+    if not force:
+        cached = _kimi_cached_quota(_KIMI_QUOTA_TTL)
+        if cached:
+            return cached
     try:
         token = _kimi_ensure_access_token()
         try:
@@ -5714,7 +5727,9 @@ def compute():
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
     kimi = _safe_scan("kimi", lambda: scan_kimi(bounds, cache), _empty_kimi, errors)
-    kimi_quota = _safe_scan("kimi_quota", fetch_kimi_quota, lambda: None, errors) or {}
+    force_kimi_quota = "--force-kimi-quota" in sys.argv
+    kimi_quota = _safe_scan(
+        "kimi_quota", lambda: fetch_kimi_quota(force=force_kimi_quota), lambda: None, errors) or {}
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
     _cache_dashboard_days(cache, _GROK_DAYS_CACHE_KEY, gk.get("days", {}))
     _save_scan_cache(cache)

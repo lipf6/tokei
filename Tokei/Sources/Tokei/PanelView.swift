@@ -1442,7 +1442,9 @@ struct PanelView: View {
             disclaimer
             Spacer()
             KeepAwakeMenu(ka: store.keepAwake)
-            IconButton(icon: "arrow.clockwise", label: "刷新") { store.refresh() }
+            IconButton(icon: "arrow.clockwise", label: "刷新") {
+                store.refresh(forceKimiQuota: true)
+            }
             IconButton(icon: "power", label: "退出") { NSApp.terminate(nil) }
         }
     }

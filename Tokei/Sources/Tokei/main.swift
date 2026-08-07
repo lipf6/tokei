@@ -29,6 +29,7 @@ final class Store: ObservableObject {
     private var retryCount = 0
     private var refreshInFlight = false
     private var refreshPending = false
+    private var forceKimiQuotaRefreshPending = false
     private var dashboardPrewarmStarted = false
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
@@ -38,17 +39,18 @@ final class Store: ObservableObject {
         }
     }
 
-    func refresh() {
+    func refresh(forceKimiQuota: Bool = false) {
         if refreshInFlight {
             refreshPending = true
+            forceKimiQuotaRefreshPending = forceKimiQuotaRefreshPending || forceKimiQuota
             return
         }
         refreshInFlight = true
-        performRefresh()
+        performRefresh(forceKimiQuota: forceKimiQuota)
     }
 
-    private func performRefresh() {
-        DataLoader.load { [weak self] u in
+    private func performRefresh(forceKimiQuota: Bool = false) {
+        DataLoader.load(forceKimiQuota: forceKimiQuota) { [weak self] u in
             guard let self = self else { return }
             guard let local = u else {
                 let hadPendingRefresh = self.refreshPending
@@ -104,7 +106,9 @@ final class Store: ObservableObject {
     private func finishRefresh() {
         if refreshPending {
             refreshPending = false
-            performRefresh()
+            let forceKimiQuota = forceKimiQuotaRefreshPending
+            forceKimiQuotaRefreshPending = false
+            performRefresh(forceKimiQuota: forceKimiQuota)
         } else {
             refreshInFlight = false
         }

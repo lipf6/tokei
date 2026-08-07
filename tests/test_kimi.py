@@ -208,6 +208,63 @@ class KimiQuotaTests(unittest.TestCase):
         self.assertTrue(quota["stale"])
         self.assertEqual(quota["error"], "not_authenticated")
 
+    def test_cache_expires_when_quota_reset_time_is_reached(self):
+        payload = {
+            "usage": {"used": "0", "limit": "100", "resetTime": "2026-08-14T08:00:00Z"},
+            "limits": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "kimi-quota.json"
+            now = int(datetime.now().timestamp())
+            cache.write_text(json.dumps({
+                "fetched_at": now,
+                "quota": {
+                    "weekly": {"used": 31, "limit": 100, "reset_at": now - 1},
+                    "limits": [],
+                },
+            }), encoding="utf-8")
+            with mock.patch.object(USAGE, "KIMI_QUOTA_CACHE", str(cache)), \
+                    mock.patch.object(USAGE, "_kimi_ensure_access_token", return_value="token") as ensure, \
+                    mock.patch.object(USAGE, "_kimi_fetch_usage_payload", return_value=payload):
+                quota = USAGE.fetch_kimi_quota()
+
+        self.assertEqual(quota["source"], "live")
+        self.assertEqual(quota["weekly"]["used"], 0)
+        ensure.assert_called_once_with()
+
+    def test_forced_refresh_bypasses_fresh_quota_cache(self):
+        payload = {
+            "usage": {"used": "0", "limit": "100", "resetTime": "2026-08-14T08:00:00Z"},
+            "limits": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "kimi-quota.json"
+            cache.write_text(json.dumps({
+                "fetched_at": int(datetime.now().timestamp()),
+                "quota": {
+                    "weekly": {"used": 31, "limit": 100, "reset_at": 4_000_000_000},
+                    "limits": [],
+                },
+            }), encoding="utf-8")
+            with mock.patch.object(USAGE, "KIMI_QUOTA_CACHE", str(cache)), \
+                    mock.patch.object(USAGE, "_kimi_ensure_access_token", return_value="token") as ensure, \
+                    mock.patch.object(USAGE, "_kimi_fetch_usage_payload", return_value=payload):
+                quota = USAGE.fetch_kimi_quota(force=True)
+
+        self.assertEqual(quota["source"], "live")
+        self.assertEqual(quota["weekly"]["used"], 0)
+        ensure.assert_called_once_with()
+
+    def test_manual_refresh_passes_force_quota_flag_to_collector(self):
+        root = Path(__file__).resolve().parents[1]
+        panel = (root / "Tokei" / "Sources" / "Tokei" / "PanelView.swift").read_text()
+        loader = (root / "Tokei" / "Sources" / "Tokei" / "DataLoader.swift").read_text()
+        collector = (root / "usage.30s.py").read_text()
+
+        self.assertIn("store.refresh(forceKimiQuota: true)", panel)
+        self.assertIn('args.append("--force-kimi-quota")', loader)
+        self.assertIn('force_kimi_quota = "--force-kimi-quota" in sys.argv', collector)
+
     def test_missing_login_returns_actionable_error_without_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = Path(tmp) / "missing.json"
