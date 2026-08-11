@@ -39,6 +39,23 @@ final class Store: ObservableObject {
         }
     }
 
+    func primeCachedUsage() {
+        guard usage == nil, let local = DataLoader.loadCachedUsage() else { return }
+        localUsage = local
+        var allDevices = local
+        if syncEnabled {
+            let report = syncManager.loadPeers()
+            peers = report.peers
+            peerLoadIssues = report.issues
+            if !peers.isEmpty {
+                allDevices = SyncManager.merge(local: local, peers: peers)
+            }
+        }
+        allDevicesUsage = allDevices
+        applyDisplayMode()
+        lastUpdated = "缓存数据 · 后台更新中"
+    }
+
     func refresh(forceKimiQuota: Bool = false) {
         if refreshInFlight {
             refreshPending = true
@@ -60,9 +77,12 @@ final class Store: ObservableObject {
                     if !hadPendingRefresh {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.refresh() }
                     }
-                } else {
+                } else if self.usage == nil {
                     self.loadError = "读取用量失败"
                     self.lastUpdated = "加载失败"
+                } else {
+                    self.loadError = nil
+                    self.lastUpdated = "缓存数据 · 等待刷新"
                 }
                 (NSApp.delegate as? AppDelegate)?.updateStatusTitle()
                 self.finishRefresh()
@@ -263,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 store.startAutoSync(minutes: interval)
             }
         }
+        store.primeCachedUsage()
         store.refresh()
         store.sitReminder.updateRunning()
         Updater.shared.checkForUpdate()

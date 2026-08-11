@@ -684,6 +684,8 @@ struct KimiExtraUsage: Codable {
 }
 
 struct KimiStat: Codable {
+    private static let persistentQuotaTTL = 5 * 60
+
     var ranges: TokenUsageRanges
     var weekly: KimiQuotaRow?
     var limits: [KimiQuotaRow]
@@ -714,6 +716,18 @@ struct KimiStat: Codable {
         q_source = try c.decodeIfPresent(String.self, forKey: .q_source)
         q_stale = try c.decodeIfPresent(Bool.self, forKey: .q_stale)
         q_error = try c.decodeIfPresent(String.self, forKey: .q_error)
+    }
+
+    /// 将磁盘快照中的额度标记为缓存来源，并按更新时间和重置时间重新判断有效性。
+    mutating func normalizePersistentQuota(now: Date = Date()) {
+        let nowEpoch = Int(now.timeIntervalSince1970)
+        let updated = q_updated ?? 0
+        let sourceStale = updated <= 0 || updated > nowEpoch ||
+            nowEpoch - updated > Self.persistentQuotaTTL
+        let resetExpired = weekly?.reset_at.map { $0 <= nowEpoch } == true ||
+            limits.contains { row in row.reset_at.map { $0 <= nowEpoch } == true }
+        q_source = "cache"
+        q_stale = sourceStale || resetExpired
     }
 }
 
