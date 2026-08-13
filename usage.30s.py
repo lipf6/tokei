@@ -176,6 +176,7 @@ _DEFAULT_PRICES = {
     "deepseek/deepseek-v4-pro":      {"in": 0.435, "out": 0.87, "cache_read": 0.0036, "cache_write": 0.0},
     "google/gemini-3.5-flash":       {"in": 1.5,   "out": 9.0,  "cache_read": 0.15,   "cache_write": 0.0833},
     "google/gemini-3.1-pro-preview": {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 0.375},
+    "x-ai/grok-4.5":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.3,    "cache_write": 0.0},
     "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
     "tencent/hy3-preview":           {"in": 0.063, "out": 0.21, "cache_read": 0.021,  "cache_write": 0.0},
 }
@@ -553,6 +554,107 @@ def _save_scan_cache(cache):
         pass
 
 
+# ---------- 持久账本(每日高水位) ----------
+# 目的:CLI(如 Claude Code 默认 30 天清理)删除旧日志后,历史用量不再缩水。
+# 语义:现存日志实时计算为准;某天实时值低于账本(=日志被清)时,用账本兜底。
+# 独立于 scan cache 的版本机制,永不因解析器/缓存升级而失效。
+_LEDGER_FILE = os.path.join(_USER_DIR, "ledger.json")
+_LEDGER_VERSION = 1
+_LEDGER_FIELDS = ("in", "out", "cr", "cw", "reason", "cached", "cost")
+
+
+def _load_ledger():
+    try:
+        with open(_LEDGER_FILE, "r") as f:
+            ledger = json.load(f)
+        if isinstance(ledger, dict) and ledger.get("v") == _LEDGER_VERSION:
+            return ledger
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    # 自愈:本地账本缺失/损坏时,从同步仓中本机快照的 _ledger 备份恢复
+    try:
+        cfg = _load_tokei_config() or {}
+        device = (cfg.get("device_id") or "").strip()
+        sync_dir = (cfg.get("sync_dir") or "").strip()
+        if device and sync_dir:
+            snap_path = os.path.join(os.path.expanduser(sync_dir), f"{device}.json")
+            with open(snap_path, "r") as f:
+                backup = json.load(f).get("_ledger")
+            if (isinstance(backup, dict) and backup.get("v") == _LEDGER_VERSION
+                    and backup.get("tools")):
+                _save_ledger(backup)
+                return backup
+    except Exception:
+        pass
+    return {"v": _LEDGER_VERSION, "tools": {}}
+
+
+def _save_ledger(ledger):
+    tmp = None
+    try:
+        directory = os.path.dirname(_LEDGER_FILE)
+        _ensure_private_directory(directory)
+        fd, tmp = _tempfile.mkstemp(prefix=".ledger-", suffix=".json", dir=directory)
+        with os.fdopen(fd, "w") as f:
+            json.dump(ledger, f, separators=(',', ':'))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, _LEDGER_FILE)
+    except Exception:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _ledger_day_total(day):
+    """字段无关的当日体量:累加所有数值字段(cost 除外),适配任意工具的 day 结构。"""
+    return sum(float(v) for k, v in day.items()
+               if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "cost")
+
+
+def ledger_reconcile(tool, live_days):
+    """对账:live_days={day: day_dict}(现存日志实时聚合,任意字段结构)。
+
+    返回 {day: day_data} 的完整视图:
+    - 实时值 >= 账本值的天:以实时为准,并把账本刷新到实时(高水位上移)
+    - 实时值 < 账本值的天(日志被部分/全部清理):返回账本存档值
+    - 账本独有的天(日志已整体消失):账本兜底
+    天级整取整用,不做字段级混合,天然避免重复计数。"""
+    ledger = _load_ledger()
+    stored = ledger["tools"].setdefault(tool, {})
+    dirty = False
+    merged = {}
+    for dk, live in live_days.items():
+        kept = stored.get(dk)
+        if kept and _ledger_day_total(kept) > _ledger_day_total(live):
+            merged[dk] = kept
+        else:
+            merged[dk] = live
+            snapshot = {k: v for k, v in live.items()
+                        if not isinstance(v, set)}
+            if kept != snapshot:
+                stored[dk] = snapshot
+                dirty = True
+    for dk, kept in stored.items():
+        if dk not in merged:
+            merged[dk] = kept
+    if dirty:
+        _save_ledger(ledger)
+    return merged
+
+
+def ledger_touch(tool):
+    """确保账本 tools 中存在该工具的键(暂无数据时写空占位),标记 scanner 已接入。"""
+    try:
+        ledger = _load_ledger()
+        if tool not in ledger.get("tools", {}):
+            ledger.setdefault("tools", {})[tool] = {}
+            _save_ledger(ledger)
+    except Exception:
+        pass
+
+
 def _with_scan_cache_lock(fn):
     def locked(*args, **kwargs):
         try:
@@ -741,6 +843,20 @@ def _merge_token_day(bucket, day, session=None):
     for model, mv in day.get("models", {}).items():
         _add_model_usage(bucket["models"], model, mv.get("in", 0), mv.get("out", 0),
                          mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0), mv.get("cost", 0))
+
+
+def _merge_live_token_day(agg, day):
+    """跨文件合并同日数据(token 字段/models/hours,均 JSON 兼容),用作 ledger 的 live_days。"""
+    _add_token_usage(agg, day.get("in", 0), day.get("out", 0), day.get("cr", 0),
+                     day.get("cw", 0), day.get("reason", 0), day.get("cost", 0))
+    for model, mv in (day.get("models") or {}).items():
+        _add_model_usage(agg["models"], model, mv.get("in", 0), mv.get("out", 0),
+                         mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0), mv.get("cost", 0))
+    hours = day.get("hours")
+    if isinstance(hours, list):
+        agg_hours = agg.setdefault("hours", [0] * 24)
+        for hour, amount in enumerate(hours[:24]):
+            agg_hours[hour] += amount
 
 
 def _format_token_models(models, include_prices=True):
@@ -938,27 +1054,49 @@ def scan_claude(bounds, cache):
         cache["_dirty"] = True
 
     # Assembly: per-day → range buckets
+    def classify(d):
+        ks = ["all"]
+        if d == today_d: ks.append("today")
+        if d == yest_d: ks.append("yesterday")
+        if d >= week_d: ks.append("week")
+        if lw_start_d <= d < lw_end_d: ks.append("last_week")
+        if d >= month_d: ks.append("month")
+        if d >= year_d: ks.append("year")
+        return ks
+
+    live_days = {}
     for f, entry in fc.items():
         for dk, day in entry.get("days", {}).items():
-            d = date.fromisoformat(dk)
-            ks = ["all"]
-            if d == today_d: ks.append("today")
-            if d == yest_d: ks.append("yesterday")
-            if d >= week_d: ks.append("week")
-            if lw_start_d <= d < lw_end_d: ks.append("last_week")
-            if d >= month_d: ks.append("month")
-            if d >= year_d: ks.append("year")
-            if not ks:
+            agg = live_days.setdefault(
+                dk, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}})
+            agg["in"] += day["in"]; agg["out"] += day["out"]
+            agg["cr"] += day["cr"]; agg["cw"] += day["cw"]; agg["cost"] += day["cost"]
+            for mn, mv in day["models"].items():
+                mm = agg["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
+                mm["in"] += mv["in"]; mm["out"] += mv["out"]
+                mm["cr"] += mv["cr"]; mm["cw"] += mv["cw"]; mm["cost"] += mv["cost"]
+            try:
+                d = date.fromisoformat(dk)
+            except ValueError:
                 continue
-            for k in ks:
-                b = B[k]
-                b["sessions"].add(f)
-                b["in"] += day["in"]; b["out"] += day["out"]
-                b["cr"] += day["cr"]; b["cw"] += day["cw"]; b["cost"] += day["cost"]
-                for mn, mv in day["models"].items():
-                    mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
-                    mm["in"] += mv["in"]; mm["out"] += mv["out"]
-                    mm["cr"] += mv["cr"]; mm["cw"] += mv["cw"]; mm["cost"] += mv["cost"]
+            for k in classify(d):
+                B[k]["sessions"].add(f)
+
+    for dk, day in ledger_reconcile("claude", live_days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in classify(d):
+            b = B[k]
+            b["in"] += day.get("in", 0); b["out"] += day.get("out", 0)
+            b["cr"] += day.get("cr", 0); b["cw"] += day.get("cw", 0)
+            b["cost"] += day.get("cost", 0.0)
+            for mn, mv in (day.get("models") or {}).items():
+                mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
+                mm["in"] += mv.get("in", 0); mm["out"] += mv.get("out", 0)
+                mm["cr"] += mv.get("cr", 0); mm["cw"] += mv.get("cw", 0)
+                mm["cost"] += mv.get("cost", 0.0)
 
     # Current session: sum all days of the most recently modified file
     cur_in = cur_out = cur_cr = cur_cw = 0
@@ -2016,6 +2154,7 @@ def _codex_canonical_file_cache(file_cache):
 
 
 def scan_codex(bounds, cache):
+    ledger_touch("codex")
     fc = cache.setdefault("codex", {})
     if _codex_migrate_event_cache(fc):
         cache["_dirty"] = True
@@ -2259,27 +2398,49 @@ def scan_codex(bounds, cache):
             cache["_dirty"] = True
 
     # Assembly: per-day → range buckets
+    def _codex_range_keys(d):
+        ks = ["all"]
+        if d == today_d: ks.append("today")
+        if d == yest_d: ks.append("yesterday")
+        if d >= week_d: ks.append("week")
+        if lw_start_d <= d < lw_end_d: ks.append("last_week")
+        if d >= month_d: ks.append("month")
+        if d >= year_d: ks.append("year")
+        return ks
+
+    live_days = {}
     for f, entry in canonical_fc.items():
         for dk, day in entry.get("days", {}).items():
             d = date.fromisoformat(dk)
-            ks = ["all"]
-            if d == today_d: ks.append("today")
-            if d == yest_d: ks.append("yesterday")
-            if d >= week_d: ks.append("week")
-            if lw_start_d <= d < lw_end_d: ks.append("last_week")
-            if d >= month_d: ks.append("month")
-            if d >= year_d: ks.append("year")
-            if not ks:
-                continue
-            for k in ks:
-                b = B[k]
-                b["sessions"].add(f)
-                b["in"] += day["in"]; b["cached"] += day["cached"]
-                b["out"] += day["out"]; b["reason"] += day["reason"]; b["cost"] += day["cost"]
-                for model, usage in day.get("models", {}).items():
-                    _add_model_usage(b["models"], model, usage.get("in", 0), usage.get("out", 0),
-                                     usage.get("cr", 0), usage.get("cw", 0),
-                                     usage.get("reason", 0), usage.get("cost", 0))
+            agg = live_days.setdefault(
+                dk, {"in": 0, "cached": 0, "out": 0, "reason": 0,
+                     "cost": 0.0, "models": {}, "hours": [0] * 24})
+            agg["in"] += day["in"]; agg["cached"] += day["cached"]
+            agg["out"] += day["out"]; agg["reason"] += day["reason"]
+            agg["cost"] += day["cost"]
+            for model, usage in day.get("models", {}).items():
+                _add_model_usage(agg["models"], model, usage.get("in", 0), usage.get("out", 0),
+                                 usage.get("cr", 0), usage.get("cw", 0),
+                                 usage.get("reason", 0), usage.get("cost", 0))
+            for hour, amount in enumerate((day.get("hours") or [])[:24]):
+                agg["hours"][hour] += amount
+            for k in _codex_range_keys(d):
+                B[k]["sessions"].add(f)
+
+    for dk, day in ledger_reconcile("codex", live_days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in _codex_range_keys(d):
+            b = B[k]
+            b["in"] += day.get("in", 0); b["cached"] += day.get("cached", 0)
+            b["out"] += day.get("out", 0); b["reason"] += day.get("reason", 0)
+            b["cost"] += day.get("cost", 0.0)
+            for model, usage in (day.get("models") or {}).items():
+                _add_model_usage(b["models"], model, usage.get("in", 0), usage.get("out", 0),
+                                 usage.get("cr", 0), usage.get("cw", 0),
+                                 usage.get("reason", 0), usage.get("cost", 0))
 
     # Find latest limits across all cached files
     latest_limits = None; latest_ts = None; plan_type = None
@@ -2454,6 +2615,7 @@ def _load_gemini_usage_file(path):
 
 
 def scan_gemini(bounds, cache):
+    ledger_touch("gemini")
     fc = cache.setdefault("gemini", {})
     files = _gemini_session_files()
     if not files:
@@ -2532,12 +2694,19 @@ def scan_gemini(bounds, cache):
         except ValueError:
             continue
         for key in classify_date(d, bounds):
+            B[key]["sessions"].update(day.get("sessions", set()))
+
+    for dk, day in ledger_reconcile("gemini", days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for key in classify_date(d, bounds):
             bucket = B[key]
-            bucket["sessions"].update(day.get("sessions", set()))
             bucket["in"] += day.get("in", 0); bucket["out"] += day.get("out", 0)
             bucket["cached"] += day.get("cached", 0)
             bucket["thoughts"] += day.get("thoughts", 0); bucket["cost"] += day.get("cost", 0)
-            for model, usage in day.get("models", {}).items():
+            for model, usage in (day.get("models") or {}).items():
                 model_usage = bucket["models"].setdefault(
                     model, {"in": 0, "out": 0, "cached": 0,
                             "thoughts": 0, "cost": 0.0})
@@ -2693,6 +2862,19 @@ def _grok_usage_record(obj):
             "out": completion - reasoning, "reason": reasoning}
 
 
+def _grok_usage_cost(record, model):
+    price_id = _pricing_id(model)
+    if not price_id:
+        return 0.0
+    price = _raw_price(price_id)
+    return (
+        int(record.get("in", 0) or 0) * price["in"]
+        + int(record.get("cr", 0) or 0) * price["cache_read"]
+        + (int(record.get("out", 0) or 0) + int(record.get("reason", 0) or 0))
+        * price["out"]
+    ) / 1_000_000
+
+
 def _load_grok_usage_records(cache):
     old = cache.get("grok_usage", {})
     if not isinstance(old, dict):
@@ -2773,8 +2955,9 @@ def _grok_usage_days(records, sessions, latest_model):
         meta = sessions.get(sid) or {}
         model = meta.get("model") or latest_model or "grok"
         amount = token_total(record)
+        cost = _grok_usage_cost(record, model)
         _add_token_usage(day, record.get("in", 0), record.get("out", 0),
-                         record.get("cr", 0), 0, record.get("reason", 0), 0.0, model)
+                         record.get("cr", 0), 0, record.get("reason", 0), cost, model)
         day["tokens"] += amount
         day["calls"] += 1
         if sid:
@@ -2784,8 +2967,9 @@ def _grok_usage_days(records, sessions, latest_model):
         project = meta.get("project") or ""
         if project:
             project_day = day["projects"].setdefault(
-                project, {"tokens": 0, "sessions": set(), "models": {}})
+                project, {"tokens": 0, "cost": 0.0, "sessions": set(), "models": {}})
             project_day["tokens"] += amount
+            project_day["cost"] += cost
             if sid:
                 project_day["sessions"].add(sid)
             project_day["models"][model] = project_day["models"].get(model, 0) + amount
@@ -3057,6 +3241,7 @@ def scan_grok_quota():
 
 
 def scan_grok(bounds, cache=None):
+    ledger_touch("grok")
     cache = cache if cache is not None else {"v": _SCAN_CACHE_VERSION}
     file_cache = cache.setdefault("grok", {})
     B = {k: {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0,
@@ -3135,15 +3320,26 @@ def scan_grok(bounds, cache=None):
             continue
         for range_key in classify_date(day_date, bounds):
             bucket = B[range_key]
-            _add_token_usage(bucket, day.get("in", 0), day.get("out", 0),
-                             day.get("cr", 0), 0, day.get("reason", 0), 0.0)
-            for model, usage in day.get("models", {}).items():
-                _add_model_usage(bucket["models"], model, usage.get("in", 0),
-                                 usage.get("out", 0), usage.get("cr", 0), 0,
-                                 usage.get("reason", 0), 0.0)
-            bucket["usage_calls"] += int(day.get("calls", 0) or 0)
             bucket["usage_sessions"].update(day.get("sessions", set()))
             bucket["sessions"].update(day.get("sessions", set()))
+
+    grok_live_days = {
+        day_key: {k: v for k, v in day.items() if k not in ("sessions", "projects")}
+        for day_key, day in usage_days.items()}
+    for day_key, day in ledger_reconcile("grok", grok_live_days).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            bucket = B[range_key]
+            _add_token_usage(bucket, day.get("in", 0), day.get("out", 0),
+                             day.get("cr", 0), 0, day.get("reason", 0), day.get("cost", 0))
+            for model, usage in (day.get("models") or {}).items():
+                _add_model_usage(bucket["models"], model, usage.get("in", 0),
+                                 usage.get("out", 0), usage.get("cr", 0), 0,
+                                 usage.get("reason", 0), usage.get("cost", 0))
+            bucket["usage_calls"] += int(day.get("calls", 0) or 0)
     return {"ranges": B, "model": latest_model, "days": usage_days}
 
 
@@ -3163,6 +3359,7 @@ def _qoder_db_path():
 
 def scan_qoder(bounds, cache):
     import sqlite3 as _sqlite3
+    ledger_touch("qoderwork")
     fc = cache.setdefault("qoder", {})
     changed = False
 
@@ -3256,7 +3453,13 @@ def scan_qoder(bounds, cache):
              "duration": 0, "turns": 0, "ctx_sum": 0.0, "ctx_count": 0}
          for k in RANGE_KEYS}
 
+    live_days = {}
     for dk, db_day in db_days.items():
+        day = dict(db_day)
+        day["sub_agents"] = int(sub_chat_days.get(dk, 0) or 0)
+        live_days[dk] = day
+
+    for dk, day in ledger_reconcile("qoderwork", live_days).items():
         try:
             d = date.fromisoformat(dk)
         except ValueError:
@@ -3265,17 +3468,17 @@ def scan_qoder(bounds, cache):
         if not ks:
             continue
 
-        calls = db_day.get("calls", 0)
-        sessions = db_day.get("sessions", 0)
-        duration = db_day.get("duration", 0)
-        turns = db_day.get("turns", 0)
-        ctx_ratio = db_day.get("ctx_ratio", 0)
+        calls = day.get("calls", 0)
+        sessions = day.get("sessions", 0)
+        duration = day.get("duration", 0)
+        turns = day.get("turns", 0)
+        ctx_ratio = day.get("ctx_ratio", 0)
 
         for k in ks:
             b = B[k]
-            b["in"] += db_day.get("in", 0); b["out"] += db_day.get("out", 0)
+            b["in"] += day.get("in", 0); b["out"] += day.get("out", 0)
             b["sessions"] += sessions; b["calls"] += calls
-            b["sub_agents"] += sub_chat_days.get(dk, 0)
+            b["sub_agents"] += day.get("sub_agents", 0)
             b["duration"] += duration; b["turns"] += turns
             if ctx_ratio > 0:
                 b["ctx_sum"] += ctx_ratio * calls
@@ -3317,6 +3520,7 @@ def scan_qoder_ide(bounds, cache):
             cache["_dirty"] = True
         return empty
 
+    ledger_touch("qoder_ide")
     qoder_ide_db = _qoder_ide_db_path()
     if not qoder_ide_db:
         if fc:
@@ -3426,22 +3630,22 @@ def scan_qoder_ide(bounds, cache):
     session_sets = {k: set() for k in RANGE_KEYS}
     sub_agent_sets = {k: set() for k in RANGE_KEYS}
 
-    for dk, day in entry.get("days", {}).items():
+    for dk, day in ledger_reconcile("qoder_ide", entry.get("days", {})).items():
         try:
             d = date.fromisoformat(dk)
         except ValueError:
             continue
         for k in classify_date(d, bounds):
             b = B[k]
-            b["in"] += day["in"]
-            b["out"] += day["out"]
-            b["cached"] += day["cached"]
-            b["calls"] += day["calls"]
+            b["in"] += day.get("in", 0)
+            b["out"] += day.get("out", 0)
+            b["cached"] += day.get("cached", 0)
+            b["calls"] += day.get("calls", 0)
             b["messages"] += day.get("messages", 0)
             b["duration"] += day.get("duration", 0)
-            for sid in day.get("session_ids", []):
+            for sid in day.get("session_ids") or []:
                 session_sets[k].add(sid)
-            for sid in day.get("sub_agent_ids", []):
+            for sid in day.get("sub_agent_ids") or []:
                 sub_agent_sets[k].add(sid)
 
     for k in RANGE_KEYS:
@@ -3735,6 +3939,7 @@ def _parse_qodercli_file(path):
 
 
 def scan_qodercli(bounds, cache):
+    ledger_touch("qodercli")
     fc = cache.setdefault("qodercli", {})
     root = _qodercli_dir()
     paths = []
@@ -3778,6 +3983,7 @@ def scan_qodercli(bounds, cache):
         cache["_dirty"] = True
 
     B = _empty_qodercli()["ranges"]
+    live_days = {}
     for path, entry in fc.items():
         if path == "_model" or not isinstance(entry, dict):
             continue
@@ -3788,10 +3994,14 @@ def scan_qodercli(bounds, cache):
                 d = date.fromisoformat(dk)
             except ValueError:
                 continue
+            agg = live_days.setdefault(dk, {"calls": 0, "tools": 0, "est": 0, "duration": 0})
+            agg["calls"] += day.get("calls", 0)
+            agg["tools"] += day.get("tools", 0)
+            agg["est"] += int(day.get("est", 0))
+            agg["duration"] += int(day.get("active", 0.0) * 1000)
             ks = classify_date(d, bounds)
             if not ks:
                 continue
-            dur_ms = int(day.get("active", 0.0) * 1000)
             for k in ks:
                 b = B[k]
                 if is_sub:
@@ -3801,15 +4011,24 @@ def scan_qodercli(bounds, cache):
                 else:
                     b["sessions"] += 1
                     b["turns"] += day.get("turns", 0)
-                b["calls"] += day.get("calls", 0)
-                b["tools"] += day.get("tools", 0)
-                b["est"] += int(day.get("est", 0))
-                b["duration"] += dur_ms
+
+    for dk, day in ledger_reconcile("qodercli", live_days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in classify_date(d, bounds):
+            b = B[k]
+            b["calls"] += day.get("calls", 0)
+            b["tools"] += day.get("tools", 0)
+            b["est"] += int(day.get("est", 0))
+            b["duration"] += int(day.get("duration", 0))
     return {"ranges": B, "model": fc.get("_model")}
 
 
 def scan_hermes(bounds, cache):
     import sqlite3 as _sq
+    ledger_touch("hermes")
     fc = cache.setdefault("hermes", {})
     changed = False
 
@@ -3838,25 +4057,45 @@ def scan_hermes(bounds, cache):
 
     B = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0.0,
              "sessions": 0, "models": {}} for k in RANGE_KEYS}
+    live_days = {}
     for db_path, entry in fc.items():
         for dk, day in entry.get("days", {}).items():
             try:
-                d = date.fromisoformat(dk)
+                date.fromisoformat(dk)
             except ValueError:
                 continue
-            for k in classify_date(d, bounds):
-                b = B[k]
-                b["in"] += day["in"]; b["out"] += day["out"]
-                b["cr"] += day["cr"]; b["cw"] += day["cw"]
-                b["reason"] += day["reason"]; b["cost"] += day["cost"]
-                b["sessions"] += day["sessions"]
-                for mn, mv in day.get("models", {}).items():
-                    mm = b["models"].setdefault(
-                        mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                             "reason": 0, "cost": 0.0})
-                    for key in TOKEN_FIELDS:
-                        mm[key] += mv.get(key, 0)
-                    mm["cost"] += mv.get("cost", 0)
+            agg = live_days.setdefault(
+                dk, {"in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0,
+                     "cost": 0.0, "sessions": 0, "models": {}, "hours": [0] * 24})
+            agg["in"] += day.get("in", 0); agg["out"] += day.get("out", 0)
+            agg["cr"] += day.get("cr", 0); agg["cw"] += day.get("cw", 0)
+            agg["reason"] += day.get("reason", 0); agg["cost"] += day.get("cost", 0)
+            agg["sessions"] += day.get("sessions", 0)
+            for mn, mv in (day.get("models") or {}).items():
+                _add_model_usage(agg["models"], mn, mv.get("in", 0), mv.get("out", 0),
+                                 mv.get("cr", 0), mv.get("cw", 0),
+                                 mv.get("reason", 0), mv.get("cost", 0))
+            for hour, amount in enumerate((day.get("hours") or [])[:24]):
+                agg["hours"][hour] += amount
+
+    for dk, day in ledger_reconcile("hermes", live_days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in classify_date(d, bounds):
+            b = B[k]
+            b["in"] += day.get("in", 0); b["out"] += day.get("out", 0)
+            b["cr"] += day.get("cr", 0); b["cw"] += day.get("cw", 0)
+            b["reason"] += day.get("reason", 0); b["cost"] += day.get("cost", 0)
+            b["sessions"] += day.get("sessions", 0)
+            for mn, mv in (day.get("models") or {}).items():
+                mm = b["models"].setdefault(
+                    mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                         "reason": 0, "cost": 0.0})
+                for key in TOKEN_FIELDS:
+                    mm[key] += mv.get(key, 0)
+                mm["cost"] += mv.get("cost", 0)
     if changed:
         cache["_dirty"] = True
     return {"ranges": B}
@@ -3919,6 +4158,7 @@ def _scan_openclaw_db(db_path, sqlite_module):
 
 def scan_openclaw(bounds, cache):
     import sqlite3 as _sq
+    ledger_touch("openclaw")
     fc = cache.setdefault("openclaw", {})
     changed = False
 
@@ -3974,6 +4214,7 @@ def scan_openclaw(bounds, cache):
         changed = True
 
     # --- Part 2: Session JSONL token usage ---
+    live_days = {}
     if os.path.isdir(OPENCLAW_AGENTS):
         stale = {k for k in fc if not k.startswith("_")}
         for f in glob.glob(os.path.join(OPENCLAW_AGENTS, "*", "sessions", "*.jsonl")):
@@ -4054,22 +4295,44 @@ def scan_openclaw(bounds, cache):
                     d = date.fromisoformat(dk)
                 except ValueError:
                     continue
+                agg = live_days.setdefault(
+                    dk, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                         "cost": 0.0, "models": {}, "hours": [0] * 24})
+                agg["in"] += day["in"]; agg["out"] += day["out"]
+                agg["cr"] += day["cr"]; agg["cw"] += day["cw"]; agg["cost"] += day["cost"]
+                for mn, mv in day["models"].items():
+                    mm = agg["models"].setdefault(
+                        mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                             "reason": 0, "cost": 0.0})
+                    for key in TOKEN_FIELDS:
+                        mm[key] += mv.get(key, 0)
+                    mm["cost"] += mv.get("cost", 0)
+                for hour, amount in enumerate((day.get("hours") or [])[:24]):
+                    agg["hours"][hour] += amount
                 for k in _day_keys(d):
-                    b = B[k]
-                    b["sessions"].add(f)
-                    b["in"] += day["in"]; b["out"] += day["out"]
-                    b["cr"] += day["cr"]; b["cw"] += day["cw"]; b["cost"] += day["cost"]
-                    for mn, mv in day["models"].items():
-                        mm = b["models"].setdefault(
-                            mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
-                                 "reason": 0, "cost": 0.0})
-                        for key in TOKEN_FIELDS:
-                            mm[key] += mv.get(key, 0)
-                        mm["cost"] += mv.get("cost", 0)
+                    B[k]["sessions"].add(f)
     else:
         for p in [key for key in fc if not key.startswith("_")]:
             fc.pop(p, None)
             changed = True
+
+    for dk, day in ledger_reconcile("openclaw", live_days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in _day_keys(d):
+            b = B[k]
+            b["in"] += day.get("in", 0); b["out"] += day.get("out", 0)
+            b["cr"] += day.get("cr", 0); b["cw"] += day.get("cw", 0)
+            b["cost"] += day.get("cost", 0)
+            for mn, mv in (day.get("models") or {}).items():
+                mm = b["models"].setdefault(
+                    mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
+                         "reason": 0, "cost": 0.0})
+                for key in TOKEN_FIELDS:
+                    mm[key] += mv.get(key, 0)
+                mm["cost"] += mv.get("cost", 0)
 
     if changed:
         cache["_dirty"] = True
@@ -4126,6 +4389,7 @@ def _pi_usage_cost(u, model):
 
 
 def scan_pi(bounds, cache):
+    ledger_touch("pi")
     fc = cache.setdefault("pi", {})
     changed = False
     B = _empty_token_ranges()
@@ -4200,14 +4464,25 @@ def scan_pi(bounds, cache):
         fc.pop(p, None)
         changed = True
 
+    live_days = {}
     for f, entry in fc.items():
+        session = entry.get("sid") or f
         for dk, day in entry.get("days", {}).items():
             try:
                 d = date.fromisoformat(dk)
             except ValueError:
                 continue
+            _merge_live_token_day(live_days.setdefault(dk, _empty_token_day()), day)
             for k in classify_date(d, bounds):
-                _merge_token_day(B[k], day, entry.get("sid") or f)
+                B[k]["sessions"].add(session)
+
+    for dk, day in ledger_reconcile("pi", live_days).items():
+        try:
+            d = date.fromisoformat(dk)
+        except ValueError:
+            continue
+        for k in classify_date(d, bounds):
+            _merge_token_day(B[k], day)
     if changed:
         cache["_dirty"] = True
     return {"ranges": B}
@@ -4359,6 +4634,7 @@ def _iter_workbuddy_records(file_cache):
 
 
 def scan_workbuddy(bounds, cache):
+    ledger_touch("workbuddy")
     fc = cache.setdefault("workbuddy", {})
     B = _empty_token_ranges()
     if not os.path.isdir(WORKBUDDY_DIR):
@@ -4423,8 +4699,15 @@ def scan_workbuddy(bounds, cache):
         except ValueError:
             continue
         for range_key in classify_date(day_date, bounds):
-            _merge_token_day(B[range_key], day)
             B[range_key]["sessions"].update(sessions.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("workbuddy", days).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
     return {"ranges": B}
 
 
@@ -4538,6 +4821,7 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
 
 
 def scan_opencode(bounds, cache):
+    ledger_touch("opencode")
     fc = cache.setdefault("opencode", {})
     changed = False
     B = _empty_token_ranges()
@@ -4551,6 +4835,8 @@ def scan_opencode(bounds, cache):
 
     stale = set(fc.keys())
     db_message_ids = set()
+    live_days = {}
+    live_sessions = {}
 
     for db_path in db_paths:
         cache_key = "db:" + db_path
@@ -4576,12 +4862,11 @@ def scan_opencode(bounds, cache):
         db_message_ids.update(entry.get("message_ids", []))
         for day_key, day in entry.get("days", {}).items():
             try:
-                day_date = date.fromisoformat(day_key)
+                date.fromisoformat(day_key)
             except ValueError:
                 continue
-            for range_key in classify_date(day_date, bounds):
-                _merge_token_day(B[range_key], day)
-                B[range_key]["sessions"].update(day.get("sessions", []))
+            _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
+            live_sessions.setdefault(day_key, set()).update(day.get("sessions", []))
 
     seen_message_ids = set(db_message_ids)
     for json_dir in json_dirs:
@@ -4624,16 +4909,32 @@ def scan_opencode(bounds, cache):
 
                 if not day_data:
                     continue
+                dk = day_data["date"]
                 try:
-                    dd = date.fromisoformat(day_data["date"])
-                except ValueError:
+                    date.fromisoformat(dk)
+                except (TypeError, ValueError):
                     continue
-                for k in classify_date(dd, bounds):
-                    _merge_token_day(B[k], day_data, day_data.get("session"))
+                _merge_live_token_day(live_days.setdefault(dk, _empty_token_day()), day_data)
+                session = day_data.get("session")
+                if session is not None:
+                    live_sessions.setdefault(dk, set()).add(session)
 
     for p in stale:
         fc.pop(p, None)
         changed = True
+
+    for day_key, day in live_days.items():
+        day["sessions"] = sorted(live_sessions.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("opencode", live_days).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+
     if changed:
         cache["_dirty"] = True
     return {"ranges": B}
@@ -4702,6 +5003,7 @@ def _scan_zcode_database(path):
 
 
 def scan_zcode(bounds, cache):
+    ledger_touch("zcode")
     fc = cache.setdefault("zcode", {})
     B = _empty_token_ranges()
     if not os.path.isfile(ZCODE_DB):
@@ -4719,7 +5021,7 @@ def scan_zcode(bounds, cache):
         fc[cache_key] = entry
         cache["_dirty"] = True
 
-    for day_key, day in entry.get("days", {}).items():
+    for day_key, day in ledger_reconcile("zcode", entry.get("days", {})).items():
         try:
             day_date = date.fromisoformat(day_key)
         except ValueError:
@@ -4768,6 +5070,7 @@ def _mimocode_db_paths():
 
 
 def scan_mimocode(bounds, cache):
+    ledger_touch("mimocode")
     fc = cache.setdefault("mimocode", {})
     B = _empty_token_ranges()
     db_paths = _mimocode_db_paths()
@@ -4788,7 +5091,7 @@ def scan_mimocode(bounds, cache):
         fc[cache_key] = entry
         cache["_dirty"] = True
 
-    for day_key, day in entry.get("days", {}).items():
+    for day_key, day in ledger_reconcile("mimocode", entry.get("days", {})).items():
         try:
             day_date = date.fromisoformat(day_key)
         except ValueError:
@@ -5026,6 +5329,7 @@ def _qwen_source_signature(paths):
 
 
 def scan_qwencode(bounds, cache):
+    ledger_touch("qwencode")
     fc = cache.setdefault("qwencode", {})
     B = _empty_token_ranges()
     token_files = _qwen_token_usage_files()
@@ -5044,13 +5348,34 @@ def scan_qwencode(bounds, cache):
         fc.update({"sig": sig, "entries": entries})
         cache["_dirty"] = True
 
+    live_days = {}
     for entry in fc.get("entries", []):
         try:
             day = date.fromisoformat(entry["date"])
         except (TypeError, ValueError, KeyError):
             continue
+        agg = live_days.setdefault(entry["date"], _empty_token_day())
+        _add_token_usage(agg, entry.get("in", 0), entry.get("out", 0), entry.get("cr", 0),
+                         entry.get("cw", 0), entry.get("reason", 0), entry.get("cost", 0))
+        for model, mv in (entry.get("models") or {}).items():
+            _add_model_usage(agg["models"], model, mv.get("in", 0), mv.get("out", 0),
+                             mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
+                             mv.get("cost", 0))
+        hour = entry.get("hour")
+        if isinstance(hour, int) and 0 <= hour < 24:
+            agg["hours"][hour] += token_total(entry)
+        session = entry.get("session")
+        if session is not None:
+            for key in classify_date(day, bounds):
+                B[key]["sessions"].add(session)
+
+    for dk, day_usage in ledger_reconcile("qwencode", live_days).items():
+        try:
+            day = date.fromisoformat(dk)
+        except (TypeError, ValueError):
+            continue
         for key in classify_date(day, bounds):
-            _merge_token_day(B[key], entry, entry.get("session"))
+            _merge_token_day(B[key], day_usage)
     return {"ranges": B}
 
 
@@ -5569,8 +5894,10 @@ def _kimi_parse_wire(path, sid, proj):
 
 
 def scan_kimi(bounds, cache):
+    ledger_touch("kimi")
     fc = cache.setdefault("kimi", {})
     ranges = _empty_token_ranges()
+    live_days = {}
     metadata = _kimi_session_metadata()
     wire_files = _kimi_wire_files()
     active = set(wire_files)
@@ -5602,8 +5929,17 @@ def scan_kimi(bounds, cache):
                 local_day = date.fromisoformat(day_key)
             except (TypeError, ValueError):
                 continue
+            _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
             for key in classify_date(local_day, bounds):
-                _merge_token_day(ranges[key], day, sid)
+                ranges[key]["sessions"].add(sid)
+
+    for day_key, day in ledger_reconcile("kimi", live_days).items():
+        try:
+            local_day = date.fromisoformat(day_key)
+        except (TypeError, ValueError):
+            continue
+        for key in classify_date(local_day, bounds):
+            _merge_token_day(ranges[key], day)
     return {"ranges": ranges}
 
 
@@ -5938,8 +6274,8 @@ def compute():
         return {"tokens": usage_total if usage_available else b.get("ctx_used", 0),
                 "hit": hit, "in": b.get("in", 0), "out": b.get("out", 0),
                 "cr": b.get("cr", 0), "reason": b.get("reason", 0),
-                "cost": 0.0,
-                "models": _format_token_models(b.get("models", {}), include_prices=False),
+                "cost": b.get("cost", 0.0),
+                "models": _format_token_models(b.get("models", {}), include_prices=True),
                 "usage_available": usage_available,
                 "usage_calls": b.get("usage_calls", 0),
                 "usage_sessions": len(b.get("usage_sessions", [])),
@@ -6117,7 +6453,7 @@ def compute():
 
 def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
-    for tool_key in ("gemini", "hermes", "zcode", "mimocode", "workbuddy", "qwencode"):
+    for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy", "qwencode"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -6157,7 +6493,7 @@ def _recalc_costs(result):
                     reason = m.get("reason", 0)
                     cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
                             + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
-                elif tool_key == "qwencode":
+                elif tool_key in ("grok", "qwencode"):
                     cr = m.get("cr", 0)
                     reason = m.get("reason", 0)
                     cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
@@ -6261,6 +6597,9 @@ def main_json():
     d = compute()
     meta = _load_json(PRICING_FILE, {}).get("_meta", {})
     d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
+    ledger = _load_ledger()
+    if ledger.get("tools"):
+        d["_ledger"] = ledger
     print(json.dumps(d, ensure_ascii=False))
     if "--no-sync-snapshot" not in sys.argv:
         _write_configured_sync_snapshot(d)
@@ -6270,6 +6609,9 @@ def write_sync_snapshot():
     d = compute()
     meta = _load_json(PRICING_FILE, {}).get("_meta", {})
     d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
+    ledger = _load_ledger()
+    if ledger.get("tools"):
+        d["_ledger"] = ledger
     return 0 if _write_configured_sync_snapshot(d) else 1
 
 
@@ -6353,11 +6695,13 @@ def main():
         print(f"今日 输出   {human(kt['out']):>6} {F}")
         if kt.get("reason"):
             print(f"今日 推理   {human(kt['reason']):>6} {F}")
+        if kt.get("cost", 0) > 0:
+            print(f"今日 ≈成本  ${kt['cost']:.2f} {F}")
     else:
         print(f"上下文快照 {human(kt['ctx_used']):>6} {F}")
     if gk.get("model"):
         print(f"model: {gk['model']} {F}")
-    print(f"  (成本未提供) | font=Menlo size=11")
+    print(f"  (成本按 API 价估,订阅实付不按此) | font=Menlo size=11")
     print("---")
     # Pi 块
     pt = d["pi"]["ranges"]["today"]
@@ -6649,7 +6993,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     days = {}
     models = {}
 
-    _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0,
+    _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
                        "workbuddy": 0.0, "opencode": 0.0, "qwencode": 0.0, "kimi": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
@@ -6718,6 +7062,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         if cutoff and dk < cutoff:
             continue
         d = days.setdefault(dk, _empty())
+        d["grok"] += day.get("cost", 0)
         d["g_in"] += day.get("in", 0); d["g_out"] += day.get("out", 0)
         d["g_cr"] += day.get("cr", 0); d["g_reason"] += day.get("reason", 0)
         d["tokens"] += token_total(day)
@@ -6726,6 +7071,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             model = models.setdefault(
                 name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
                        "reason": 0, "tool": "grok"})
+            model["cost"] += usage.get("cost", 0)
             for key in TOKEN_FIELDS:
                 model[key] += int(usage.get(key, 0) or 0)
 
@@ -6814,12 +7160,14 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         if cutoff and dk < cutoff:
             continue
         d = days.setdefault(dk, _empty())
+        d["kimi"] += day_data.get("cost", 0)
         d["tokens"] += token_total(day_data)
         for mn, mv in day_data.get("models", {}).items():
             name = f"{nice_model(mn)} (Kimi Code)"
             model = models.setdefault(
                 name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
                        "reason": 0, "tool": "kimi"})
+            model["cost"] += mv.get("cost", 0)
             for key in TOKEN_FIELDS:
                 model[key] += mv.get(key, 0)
 
@@ -6899,14 +7247,14 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2),
               "gemini": round(v["gemini"], 2), "hermes": round(v["hermes"], 2),
-              "openclaw": round(v["openclaw"], 2),
+              "openclaw": round(v["openclaw"], 2), "grok": round(v["grok"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2), "qwencode": round(v["qwencode"], 2),
-              "kimi": 0.0,
-              "total": round(v["claude"] + v["codex"] + v["gemini"] + v["zcode"]
+              "kimi": round(v["kimi"], 2),
+              "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"]
                              + v["opencode"] + v["qwencode"] + v["hermes"]
-                             + v["openclaw"], 2),
+                             + v["openclaw"] + v["kimi"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
@@ -7058,6 +7406,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
         tok = token_total(day)
         day_tokens[dk] = day_tokens.get(dk, 0) + tok
         total_tokens += tok
+        total_cost += day.get("cost", 0)
         weekday[date.fromisoformat(dk).weekday()] += tok
         add_hours(dk, day.get("hours"))
         for model, usage in day.get("models", {}).items():
@@ -7500,6 +7849,7 @@ def projects():
                                                  "last_active": "", "model_tok": {}, "tools": set()})
             p["tools"].add("grok")
             p["tokens"] += int(usage.get("tokens", 0) or 0)
+            p["cost"] += float(usage.get("cost", 0) or 0)
             if dk > p["last_active"]:
                 p["last_active"] = dk
             session_ids = {sid for sid in usage.get("sessions", []) if sid}

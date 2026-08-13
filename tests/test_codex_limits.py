@@ -11,6 +11,16 @@ SPEC = importlib.util.spec_from_file_location("tokei_usage", SCRIPT)
 USAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(USAGE)
 
+# 测试不得读写本机 ~/.tokei/ledger.json
+_LEDGER_DIR = tempfile.TemporaryDirectory(prefix="tokei-ledger-")
+USAGE._LEDGER_FILE = str(Path(_LEDGER_DIR.name) / "ledger.json")
+Path(USAGE._LEDGER_FILE).write_text('{"v":1,"tools":{}}', encoding="utf-8")
+_REAL_LEDGER_RECONCILE = USAGE.ledger_reconcile
+_REAL_LEDGER_TOUCH = USAGE.ledger_touch
+# 默认测试走实时日志,避免共享账本把“今天”的高水位串到其他用例
+USAGE.ledger_reconcile = lambda tool, live_days: live_days
+USAGE.ledger_touch = lambda tool: None
+
 
 class _Response:
     def __init__(self, payload, url=None):

@@ -188,6 +188,13 @@ Token、会话和项目统计来自本地日志。Codex、Kimi 等套餐额度�
 
 ## 更新日志
 
+### v1.0.27
+
+- feat: 引入每日高水位账本，日志被 CLI 清理后历史用量不再缩水；Kimi Code 一并接入
+- feat: 账本随多设备同步快照备份，本地账本丢失时可自愈恢复
+- feat: Grok Build 按 API 价估算成本，并进入卡片、数据面板、年度回顾和项目轨迹
+- chore: 附 `scripts/backfill_ledger.py`，可从同步仓 git 历史回填已丢失的每日用量
+
 ### v1.0.26
 
 - fix: Codex 日志解析不再依赖 JSON 字段顺序，兼容 `ordinal` 等新增元数据并跳过无时间戳记录
