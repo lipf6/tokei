@@ -12,14 +12,19 @@ class LedgerReconcileTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.old_file = USAGE._LEDGER_FILE
         USAGE._LEDGER_FILE = str(Path(self.temp.name) / "ledger.json")
+        USAGE._LEDGER_CACHE = {"data": None, "dirty": False}
         USAGE.ledger_reconcile = _REAL_LEDGER_RECONCILE
         USAGE.ledger_touch = _REAL_LEDGER_TOUCH
 
     def tearDown(self):
         USAGE._LEDGER_FILE = self.old_file
+        USAGE._LEDGER_CACHE = {"data": None, "dirty": False}
         USAGE.ledger_reconcile = lambda tool, live_days: live_days
         USAGE.ledger_touch = lambda tool: None
         self.temp.cleanup()
+
+    def flush(self):
+        USAGE.ledger_flush()
 
     def test_live_higher_updates_high_water(self):
         first = USAGE.ledger_reconcile("claude", {
@@ -31,6 +36,7 @@ class LedgerReconcileTests(unittest.TestCase):
             "2026-08-01": {"in": 180, "out": 20, "cost": 1.8},
         })
         self.assertEqual(second["2026-08-01"]["in"], 180)
+        self.flush()
         stored = json.loads(Path(USAGE._LEDGER_FILE).read_text(encoding="utf-8"))
         self.assertEqual(stored["tools"]["claude"]["2026-08-01"]["in"], 180)
 
@@ -50,6 +56,7 @@ class LedgerReconcileTests(unittest.TestCase):
         USAGE.ledger_reconcile("gemini", {
             "2026-08-03": {"in": 10, "out": 2, "sessions": {"a", "b"}},
         })
+        self.flush()
         stored = json.loads(Path(USAGE._LEDGER_FILE).read_text(encoding="utf-8"))
         self.assertNotIn("sessions", stored["tools"]["gemini"]["2026-08-03"])
 

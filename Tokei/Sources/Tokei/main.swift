@@ -161,7 +161,8 @@ final class Store: ObservableObject {
                 ? nil : usage.claude.q7.map { 100 - $0 },
             claudeFableWeekRemaining: usage.claude.qf_stale == true
                 ? nil : usage.claude.qf.map { 100 - $0 },
-            codexWeekRemaining: usage.codex.pw.map { 100 - $0 },
+            codexWeekRemaining: usage.codex.pw_stale == true
+                ? nil : usage.codex.pw.map { 100 - $0 },
             kimiFiveHourRemaining: usage.kimi.q_stale == true
                 ? nil : kimiFiveHour?.usedPercent.map { 100 - $0 },
             kimiWeekRemaining: usage.kimi.q_stale == true
@@ -327,6 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                      remaining: remaining))
             }
             if MenuBarQuotaSource.codex.isEnabled,
+               u.codex.pw_stale != true,
                let quota = u.codex.pw {
                 let remaining = 100 - quota
                 metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
@@ -483,6 +485,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
         } else {
             store.refresh()
+            // 轨迹页的额度明细要跑 1~3 秒,面板一开就预热,免得切过去干等。
+            QuotaDetailRepository.shared.load()
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
