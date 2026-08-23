@@ -51,6 +51,11 @@ struct QuotaCycle: Codable, Identifiable {
             .sorted { $0.value > $1.value }
             .map { (name: $0.key, tokens: $0.value) }
     }
+
+    func paceForecast(now: Int) -> QuotaPaceForecast? {
+        guard current, let used = used_pct else { return nil }
+        return QuotaPace.forecast(usedPercent: used, start: start, end: end, now: now)
+    }
 }
 
 struct QuotaDetailPayload: Codable {

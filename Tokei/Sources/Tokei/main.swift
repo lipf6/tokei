@@ -145,6 +145,14 @@ final class Store: ObservableObject {
             totals[model.name, default: 0] +=
                 model.in + model.out + model.cr + model.cw + model.reason
         }
+        let grokRange = usage.grok.ranges.get(.today)
+        var grokModels = grokRange.models.reduce(into: [String: Int]()) { totals, model in
+            totals[model.name, default: 0] +=
+                model.in + model.out + model.cr + model.cw + model.reason
+        }
+        if grokModels.isEmpty, grokRange.tokens > 0 {
+            grokModels[usage.grok.model ?? "Grok"] = grokRange.tokens
+        }
         let kimiRange = usage.kimi.ranges.get(.today)
         let kimiModels = kimiRange.models.reduce(into: [String: Int]()) { totals, model in
             guard model.name != "合成" else { return }
@@ -154,6 +162,7 @@ final class Store: ObservableObject {
         let kimiFiveHour = usage.kimi.limits.first {
             $0.duration == 5 && $0.unit == "hour"
         }
+        let grokIsWeekly = usage.grok.window == nil || usage.grok.window == "week"
         quotaHistory.record(QuotaCapture(
             claudeFiveHourRemaining: usage.claude.q5_stale == true
                 ? nil : usage.claude.q5.map { 100 - $0 },
@@ -163,12 +172,15 @@ final class Store: ObservableObject {
                 ? nil : usage.claude.qf.map { 100 - $0 },
             codexWeekRemaining: usage.codex.pw_stale == true
                 ? nil : usage.codex.pw.map { 100 - $0 },
+            grokWeekRemaining: (usage.grok.stale == true || !grokIsWeekly)
+                ? nil : usage.grok.pct.map { 100 - $0 },
             kimiFiveHourRemaining: usage.kimi.q_stale == true
                 ? nil : kimiFiveHour?.usedPercent.map { 100 - $0 },
             kimiWeekRemaining: usage.kimi.q_stale == true
                 ? nil : usage.kimi.weekly?.usedPercent.map { 100 - $0 },
             claudeModelTotals: claudeModels,
             codexModelTotals: codexModels,
+            grokModelTotals: grokModels,
             kimiModelTotals: kimiModels
         ))
     }

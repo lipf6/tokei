@@ -99,7 +99,81 @@ struct QuotaHistoryStoreCheck {
         try expect(reloaded.points.count == 1, "points outside retention should be pruned")
 
         try checkProjection()
+        try checkGrokAndVisibility()
+        try checkPaceForecast()
         print("quota history store checks passed")
+    }
+
+    private static func checkGrokAndVisibility() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tokei-quota-grok-\(UUID().uuidString)")
+        let fileURL = directory.appendingPathComponent("quota_history.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let base = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = QuotaHistoryStore(fileURL: fileURL)
+        store.record(
+            QuotaCapture(
+                grokWeekRemaining: 73,
+                grokModelTotals: ["grok-4.5": 1_000]
+            ),
+            at: base
+        )
+        store.record(
+            QuotaCapture(
+                grokWeekRemaining: 70,
+                grokModelTotals: ["grok-4.5": 1_400]
+            ),
+            at: base.addingTimeInterval(65)
+        )
+        try expect(store.points.count == 2, "grok quota should create history points")
+        try expect(store.points[1].grokWeekRemaining == 70, "grok remaining should be stored")
+        try expect(store.points[1].grokActivity == [
+            QuotaModelActivity(model: "grok-4.5", tokenDelta: 400),
+        ], "grok model delta should be recorded")
+        try expect(store.points[1].hasTrajectory(for: .grok), "grok points should count as used")
+        try expect(!store.points[1].hasTrajectory(for: .claude),
+                   "empty claude fields should not count as used")
+        try expect(!store.points[1].hasTrajectory(for: .codex),
+                   "empty codex fields should not count as used")
+    }
+
+    private static func checkPaceForecast() throws {
+        let week = 7 * 24 * 3600
+        let elapsed76h = 76 * 3600
+        let leftover = QuotaPace.forecast(
+            usedPercent: 12, start: 0, end: week, now: elapsed76h)
+        try expect(leftover != nil, "12% after 76h should produce a forecast")
+        try expect(
+            abs((leftover?.remainingAtReset ?? 0) - (100 - 12.0 * 168 / 76)) < 0.01,
+            "remaining at reset should be 100 - used * span / elapsed"
+        )
+        try expect(
+            abs((leftover?.daysLasts ?? 0) - (88.0 / 12.0 * 76.0 / 24.0)) < 0.01,
+            "days remaining should be leftover% / used% * elapsed days"
+        )
+
+        let overshoot = QuotaPace.forecast(
+            usedPercent: 40, start: 0, end: week, now: 2 * 86_400)
+        try expect(overshoot != nil, "fast burn should still forecast")
+        try expect((overshoot?.remainingAtReset ?? 0) < 0, "40% in 2 days of 7 should overshoot")
+        try expect(
+            abs((overshoot?.remainingAtReset ?? 0) - (100 - 140)) < 0.01,
+            "overshoot remaining should be negative"
+        )
+        try expect(
+            abs((overshoot?.daysLasts ?? 0) - 3.0) < 0.01,
+            "60% leftover at 20%/day lasts 3 days"
+        )
+
+        try expect(
+            QuotaPace.forecast(usedPercent: 2, start: 0, end: week, now: elapsed76h) == nil,
+            "used below 3% should not forecast"
+        )
+        try expect(
+            QuotaPace.forecast(usedPercent: 12, start: 0, end: week, now: 100) == nil,
+            "elapsed under one hour should not forecast"
+        )
     }
 
     private static func checkProjection() throws {

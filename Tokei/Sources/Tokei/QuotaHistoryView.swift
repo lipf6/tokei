@@ -6,6 +6,7 @@ private extension QuotaHistoryTool {
         switch self {
         case .claude: return Theme.claude
         case .codex: return Theme.codex
+        case .grok: return Theme.grok
         case .kimi: return Theme.kimi
         }
     }
@@ -55,7 +56,7 @@ private struct QuotaHistoryFrame {
 struct QuotaHistoryView: View {
     @ObservedObject var history: QuotaHistoryStore
     @ObservedObject private var detail = QuotaDetailRepository.shared
-    @State private var tool: QuotaHistoryTool = .claude
+    @State private var tool: QuotaHistoryTool = .codex
     @State private var span: QuotaHistorySpan = .day
     @State private var cycleTool: String?
 
@@ -63,6 +64,25 @@ struct QuotaHistoryView: View {
     private var cycleTools: [String] {
         let present = Set((detail.payload?.cycles ?? []).map(\.tool))
         return ["claude", "codex", "grok", "kimi"].filter(present.contains)
+    }
+
+    /// 轨迹 Tab 只出当前跨度里真正有额度/活动的工具；刚开始记录时也带上已有周额度卡的工具。
+    private var visibleTools: [QuotaHistoryTool] {
+        let start = Date().addingTimeInterval(TimeInterval(-span.rawValue * 60 * 60))
+        let spanPoints = history.points(since: start)
+        let fromHistory = Set(QuotaHistoryTool.allCases.filter { tool in
+            spanPoints.contains { $0.hasTrajectory(for: tool) }
+        })
+        let fromCycles = Set(cycleTools.compactMap { key in
+            QuotaHistoryTool.allCases.first { $0.cycleKey == key }
+        })
+        return QuotaHistoryTool.allCases.filter { fromHistory.contains($0) || fromCycles.contains($0) }
+    }
+
+    private func snapToolIfNeeded() {
+        if !visibleTools.contains(tool) {
+            tool = visibleTools.first ?? .codex
+        }
     }
 
     private var visibleCycleTools: [String] {
@@ -91,7 +111,13 @@ struct QuotaHistoryView: View {
             }
             footnote
         }
-        .onAppear { detail.load() }
+        .onAppear {
+            detail.load()
+            snapToolIfNeeded()
+        }
+        .onChange(of: span) { _ in snapToolIfNeeded() }
+        .onChange(of: history.points.count) { _ in snapToolIfNeeded() }
+        .onChange(of: detail.payload?.now) { _ in snapToolIfNeeded() }
     }
 
     @ViewBuilder
@@ -251,16 +277,34 @@ struct QuotaHistoryView: View {
                         .foregroundStyle(Theme.tTertiary)
                 }
                 Spacer()
-                if let projected = cycle.projectedTotal {
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("照这个用法，整个周期约")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(Theme.tTertiary)
-                        Text(Fmt.human(projected))
-                            .font(.system(size: 17, weight: .bold, design: .rounded))
-                            .foregroundStyle(Theme.tSecondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.6)
+                VStack(alignment: .trailing, spacing: 4) {
+                    if let projected = cycle.projectedTotal {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("照这个用法，整个周期约")
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(Theme.tTertiary)
+                            Text(Fmt.human(projected))
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .foregroundStyle(Theme.tSecondary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.6)
+                        }
+                    }
+                    if let now = detail.payload?.now, let pace = cycle.paceForecast(now: now) {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            if pace.remainingAtReset >= 0 {
+                                Text(String(format: "到回满预计剩余 %.0f%%", pace.remainingAtReset))
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(Theme.tSecondary)
+                            } else {
+                                Text(String(format: "到回满预计超支 %.0f%%", abs(pace.remainingAtReset)))
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(Color.orange.opacity(0.95))
+                            }
+                            Text(String(format: "按节奏还能撑 %.1f 天", pace.daysLasts))
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(Theme.tTertiary)
+                        }
                     }
                 }
             }
@@ -448,14 +492,14 @@ struct QuotaHistoryView: View {
                     .foregroundStyle(Theme.tTertiary)
             }
             Spacer()
-            if !span.showsDailyTokens {
+            if !span.showsDailyTokens, visibleTools.count >= 2 {
                 Picker("", selection: $tool) {
-                    ForEach(QuotaHistoryTool.allCases) { tool in
-                        Text(tool.rawValue).tag(tool)
+                    ForEach(visibleTools) { tool in
+                        Text(tool.pickerLabel).tag(tool)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 210)
+                .frame(width: CGFloat(min(70 * visibleTools.count, 280)))
                 .controlSize(.mini)
             }
             Picker("", selection: $span) {
@@ -633,6 +677,8 @@ struct QuotaHistoryView: View {
             return Color(red: 1.00, green: 0.72, blue: 0.16)
         case (.codex, "周"):
             return Theme.codex
+        case (.grok, "周"):
+            return Theme.grok
         default:
             return tool.tint
         }

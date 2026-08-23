@@ -3,15 +3,32 @@ import Foundation
 enum QuotaHistoryTool: String, CaseIterable, Identifiable {
     case claude = "Claude"
     case codex = "Codex"
+    case grok = "Grok"
     case kimi = "Kimi Code"
 
     var id: String { rawValue }
+
+    var pickerLabel: String {
+        switch self {
+        case .kimi: return "Kimi"
+        default: return rawValue
+        }
+    }
+
+    var cycleKey: String {
+        switch self {
+        case .claude: return "claude"
+        case .codex: return "codex"
+        case .grok: return "grok"
+        case .kimi: return "kimi"
+        }
+    }
 
     var windowNames: [String] {
         switch self {
         case .claude:
             return ["5 小时", "周 · 全部", "周 · Fable"]
-        case .codex:
+        case .codex, .grok:
             return ["周"]
         case .kimi:
             return ["周", "5 小时"]
@@ -236,6 +253,7 @@ struct QuotaHistoryProjection {
         switch tool {
         case .claude: return point.claudeActivity
         case .codex: return point.codexActivity
+        case .grok: return point.grokActivity
         case .kimi: return point.kimiActivity
         }
     }
@@ -264,6 +282,8 @@ struct QuotaHistoryProjection {
             return point.claudeFableWeekRemaining
         case (.codex, "周"):
             return point.codexWeekRemaining
+        case (.grok, "周"):
+            return point.grokWeekRemaining
         case (.kimi, "周"):
             return point.kimiWeekRemaining
         case (.kimi, "5 小时"):
