@@ -473,12 +473,16 @@ final class QuotaHistoryStore: ObservableObject {
     }
 }
 
-/// 按当前已用比例外推：周期结束时还剩多少、额度还能撑几天。
+/// 按当前已用比例外推：周期结束时还剩多少、额度会不会在回满前见底。
 struct QuotaPaceForecast: Equatable {
     /// 到回满时刻预计剩余百分比；超支为负数。
     var remainingAtReset: Double
-    /// 按现在节奏把剩余额度用完还要几天。
-    var daysLasts: Double
+    /// 按现在节奏把剩余额度用完还要几天（不考虑回满）。
+    var daysUntilEmpty: Double
+    /// 距本周期回满还有几天。
+    var daysUntilReset: Double
+
+    var willExhaustBeforeReset: Bool { daysUntilEmpty < daysUntilReset }
 }
 
 enum QuotaPace {
@@ -497,7 +501,15 @@ enum QuotaPace {
         guard elapsed >= minElapsed, span > 0, now < end, now > start else { return nil }
         let projectedUsed = usedPercent * span / elapsed
         let remainingAtReset = 100 - projectedUsed
-        let daysLasts = (100 - usedPercent) / usedPercent * (elapsed / 86_400)
-        return QuotaPaceForecast(remainingAtReset: remainingAtReset, daysLasts: daysLasts)
+        let daysUntilReset = Double(end - now) / 86_400
+        let leftover = max(100 - usedPercent, 0)
+        let daysUntilEmpty = leftover == 0
+            ? 0
+            : leftover / usedPercent * (elapsed / 86_400)
+        return QuotaPaceForecast(
+            remainingAtReset: remainingAtReset,
+            daysUntilEmpty: daysUntilEmpty,
+            daysUntilReset: daysUntilReset
+        )
     }
 }

@@ -301,9 +301,15 @@ struct QuotaHistoryView: View {
                                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                                     .foregroundStyle(Color.orange.opacity(0.95))
                             }
-                            Text(String(format: "按节奏还能撑 %.1f 天", pace.daysLasts))
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(Theme.tTertiary)
+                            if pace.willExhaustBeforeReset {
+                                Text(String(format: "预计 %.1f 天后额度见底", pace.daysUntilEmpty))
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(Color.orange.opacity(0.95))
+                            } else {
+                                Text(String(format: "能撑到回满（还剩 %.1f 天）", pace.daysUntilReset))
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(Theme.tTertiary)
+                            }
                         }
                     }
                 }

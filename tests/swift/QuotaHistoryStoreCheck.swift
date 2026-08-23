@@ -149,9 +149,15 @@ struct QuotaHistoryStoreCheck {
             "remaining at reset should be 100 - used * span / elapsed"
         )
         try expect(
-            abs((leftover?.daysLasts ?? 0) - (88.0 / 12.0 * 76.0 / 24.0)) < 0.01,
-            "days remaining should be leftover% / used% * elapsed days"
+            abs((leftover?.daysUntilEmpty ?? 0) - (88.0 / 12.0 * 76.0 / 24.0)) < 0.01,
+            "uncapped empty time should still be leftover% / used% * elapsed days"
         )
+        try expect(
+            abs((leftover?.daysUntilReset ?? 0) - (92.0 / 24.0)) < 0.01,
+            "days until reset should be remaining cycle time"
+        )
+        try expect(leftover?.willExhaustBeforeReset == false,
+                   "12% in ~3 days of a week should last until reset")
 
         let overshoot = QuotaPace.forecast(
             usedPercent: 40, start: 0, end: week, now: 2 * 86_400)
@@ -162,9 +168,11 @@ struct QuotaHistoryStoreCheck {
             "overshoot remaining should be negative"
         )
         try expect(
-            abs((overshoot?.daysLasts ?? 0) - 3.0) < 0.01,
-            "60% leftover at 20%/day lasts 3 days"
+            abs((overshoot?.daysUntilEmpty ?? 0) - 3.0) < 0.01,
+            "60% leftover at 20%/day hits empty in 3 days"
         )
+        try expect(overshoot?.willExhaustBeforeReset == true,
+                   "hitting empty in 3 days of 5 remaining should exhaust before reset")
 
         try expect(
             QuotaPace.forecast(usedPercent: 2, start: 0, end: week, now: elapsed76h) == nil,
