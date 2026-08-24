@@ -2637,6 +2637,8 @@ def scan_codex(bounds, cache):
             plan_type = live_plan or (live_limits or {}).get("plan_type") or plan_type
             limits_updated = int(live_updated)
 
+    latest_limits = _codex_reconcile_week_limits(latest_limits, fc, int(datetime.now().timestamp()))
+
     # 窗口翻篇后本机又消耗了多少 —— 用来区分「确实回满了」和「读数已经失真」。
     # now_epoch=0 让映射函数只做槽位归类,不触发过期处理。
     slots = _codex_quota_values(latest_limits, now_epoch=0)
@@ -2712,6 +2714,73 @@ def _codex_keep_log_week(log_limits, live_limits, now_epoch):
     if live_used is None or live_used >= 2:
         return False
     return bool(log_used is not None and log_used >= 2 and log_reset and log_reset > now_epoch)
+
+
+def _codex_active_week_from_cache(file_cache, now_epoch):
+    """在全部会话缓存里找仍在进行、且真正用过的周窗口。
+
+    最新一条 rate_limits 经常是官方 usage 的空窗(used=0, reset=now+7d),
+    只看最新一条会把 8 月 27 日那个还有效的窗口丢掉。
+    """
+    best = None
+    for entry in (file_cache or {}).values():
+        if not isinstance(entry, dict):
+            continue
+        for key, ts_key in (("limits", "limits_ts"), ("g_limits", "g_ts")):
+            used, reset = _codex_week_slot(entry.get(key))
+            try:
+                used = float(used) if used is not None else None
+                reset = float(reset) if reset is not None else None
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if used is None or reset is None or used < 2 or reset <= now_epoch:
+                continue
+            ts_epoch = _iso_to_epoch(entry.get(ts_key)) or 0
+            if best is None or ts_epoch > best[0] or (ts_epoch == best[0] and used > best[1]):
+                best = (ts_epoch, used, reset)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def _codex_patch_week(limits, used, reset):
+    out = dict(limits) if isinstance(limits, dict) else {}
+    patched = False
+    for slot_name in ("primary", "secondary"):
+        slot = out.get(slot_name)
+        if not isinstance(slot, dict):
+            continue
+        minutes = slot.get("window_minutes")
+        is_week = minutes == 7 * 24 * 60 or (minutes is None and slot_name == "secondary")
+        if not is_week:
+            continue
+        slot = dict(slot)
+        slot["used_percent"] = used
+        slot["resets_at"] = int(reset)
+        out[slot_name] = slot
+        patched = True
+    if not patched:
+        out["primary"] = {
+            "used_percent": used,
+            "window_minutes": 7 * 24 * 60,
+            "resets_at": int(reset),
+        }
+    return out
+
+
+def _codex_reconcile_week_limits(limits, file_cache, now_epoch):
+    used, reset = _codex_week_slot(limits)
+    try:
+        used = float(used) if used is not None else None
+        reset = float(reset) if reset is not None else None
+    except (TypeError, ValueError, OverflowError):
+        used, reset = None, None
+    if used is not None and used >= 2 and reset and reset > now_epoch:
+        return limits
+    active = _codex_active_week_from_cache(file_cache, now_epoch)
+    if active is None:
+        return limits
+    return _codex_patch_week(limits if isinstance(limits, dict) else {}, active[0], active[1])
 
 
 def _codex_quota_values(limits, now_epoch=None, consumed=None):

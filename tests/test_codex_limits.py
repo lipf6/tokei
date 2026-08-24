@@ -154,6 +154,63 @@ class CodexQuotaValuesTests(unittest.TestCase):
         }
         self.assertFalse(USAGE._codex_keep_log_week(log, live, now))
 
+    def test_reconcile_week_uses_older_active_window_over_latest_idle(self):
+        now = 1_000_000
+        idle = {
+            "primary": {
+                "used_percent": 0.0,
+                "window_minutes": 10080,
+                "resets_at": now + 7 * 24 * 3600,
+            },
+        }
+        active = {
+            "primary": {
+                "used_percent": 17.0,
+                "window_minutes": 10080,
+                "resets_at": now + 76 * 3600,
+            },
+        }
+        cache = {
+            "old.jsonl": {
+                "limits": active,
+                "limits_ts": "2026-08-23T13:18:45+00:00",
+            },
+            "new.jsonl": {
+                "limits": idle,
+                "limits_ts": "2026-08-24T01:24:29+00:00",
+            },
+        }
+        reconciled = USAGE._codex_reconcile_week_limits(idle, cache, now)
+        used, reset = USAGE._codex_week_slot(reconciled)
+        self.assertEqual(used, 17.0)
+        self.assertEqual(reset, now + 76 * 3600)
+
+    def test_reconcile_week_keeps_latest_when_it_has_real_usage(self):
+        now = 1_000_000
+        latest = {
+            "primary": {
+                "used_percent": 19.0,
+                "window_minutes": 10080,
+                "resets_at": now + 70 * 3600,
+            },
+        }
+        cache = {
+            "old.jsonl": {
+                "limits": {
+                    "primary": {
+                        "used_percent": 17.0,
+                        "window_minutes": 10080,
+                        "resets_at": now + 76 * 3600,
+                    },
+                },
+                "limits_ts": "2026-08-23T13:18:45+00:00",
+            },
+        }
+        reconciled = USAGE._codex_reconcile_week_limits(latest, cache, now)
+        used, reset = USAGE._codex_week_slot(reconciled)
+        self.assertEqual(used, 19.0)
+        self.assertEqual(reset, now + 70 * 3600)
+
     def test_live_quota_rejects_cross_origin_redirect(self):
         payload = {
             "rate_limit": {

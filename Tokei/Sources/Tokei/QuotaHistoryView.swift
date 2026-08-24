@@ -225,8 +225,20 @@ struct QuotaHistoryView: View {
     }
 
     /// 拿不到额度读数的工具 —— 周期切不出来,得告诉用户怎么把它找回来。
+    /// 账本里完全没用量的工具不提示(例如没用过 Claude)。
     private var missingTools: [String] {
-        detail.payload?.missing ?? []
+        (detail.payload?.missing ?? []).filter { hasLedgerUsage($0) }
+    }
+
+    private func hasLedgerUsage(_ tool: String) -> Bool {
+        guard let daily = detail.payload?.daily else { return false }
+        switch tool {
+        case "claude": return daily.contains { $0.c > 0 }
+        case "codex": return daily.contains { $0.x > 0 }
+        case "grok": return daily.contains { $0.g > 0 }
+        case "kimi": return daily.contains { $0.k > 0 }
+        default: return false
+        }
     }
 
     private func missingHint(_ tool: String) -> String {
@@ -250,7 +262,7 @@ struct QuotaHistoryView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(cycleTint(cycle.tool))
                 Spacer()
-                Text("\(Fmt.countdown(cycle.end)) 后回满")
+                Text("\(Fmt.reset(cycle.end)) 回满 · \(Fmt.countdown(cycle.end))")
                     .font(.system(size: 9.5))
                     .foregroundStyle(Theme.tTertiary)
             }
@@ -305,10 +317,6 @@ struct QuotaHistoryView: View {
                                 Text(String(format: "预计 %.1f 天后额度见底", pace.daysUntilEmpty))
                                     .font(.system(size: 9.5))
                                     .foregroundStyle(Color.orange.opacity(0.95))
-                            } else {
-                                Text(String(format: "能撑到回满（还剩 %.1f 天）", pace.daysUntilReset))
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(Theme.tTertiary)
                             }
                         }
                     }
