@@ -2626,7 +2626,13 @@ def scan_codex(bounds, cache):
     live = fetch_codex_live_limits()
     if live:
         live_limits, live_plan, live_updated = live
-        if _codex_live_snapshot_is_current(live_updated, selected_limits_ts):
+        now_epoch = int(datetime.now().timestamp())
+        keep_log_week = (
+            latest_limits is not None
+            and _codex_keep_log_week(latest_limits, live_limits, now_epoch)
+        )
+        if (not keep_log_week) and _codex_live_snapshot_is_current(
+                live_updated, selected_limits_ts):
             latest_limits = live_limits
             plan_type = live_plan or (live_limits or {}).get("plan_type") or plan_type
             limits_updated = int(live_updated)
@@ -2681,6 +2687,31 @@ def _codex_used_since(days, since_epoch):
         # 没有小时分布(老账本条目)就整天算,保守方向是宁多勿少
         total += sum(int(h or 0) for h in hours[start.hour:24]) if hours else whole_day
     return total
+
+
+def _codex_week_slot(limits):
+    """只做 5h/周槽位归类,不处理过期。"""
+    values = _codex_quota_values(limits, now_epoch=0)
+    return values.get("pw"), values.get("rw")
+
+
+def _codex_keep_log_week(log_limits, live_limits, now_epoch):
+    """官方 usage 在窗口没翻完时会报 used=0、reset=now+7d,盖掉日志里仍有效的周额度。
+
+    周期卡已经用 max_used>=2 滤掉这种漂锚;主卡必须同样拒绝,否则会显示
+    「周剩余 100% · 七天后」而实际这周已经用过。
+    """
+    live_used, _live_reset = _codex_week_slot(live_limits)
+    log_used, log_reset = _codex_week_slot(log_limits)
+    try:
+        live_used = float(live_used) if live_used is not None else None
+        log_used = float(log_used) if log_used is not None else None
+        log_reset = float(log_reset) if log_reset is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if live_used is None or live_used >= 2:
+        return False
+    return bool(log_used is not None and log_used >= 2 and log_reset and log_reset > now_epoch)
 
 
 def _codex_quota_values(limits, now_epoch=None, consumed=None):

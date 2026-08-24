@@ -100,6 +100,60 @@ class CodexQuotaValuesTests(unittest.TestCase):
              "p5_stale": False, "pw_stale": True},
         )
 
+    def test_keep_log_week_when_live_is_empty_seven_day_window(self):
+        now = 1_000_000
+        log = {
+            "primary": {
+                "used_percent": 18.0,
+                "window_minutes": 10080,
+                "resets_at": now + 76 * 3600,
+            },
+        }
+        live = {
+            "primary": {
+                "used_percent": 0.0,
+                "window_minutes": 10080,
+                "resets_at": now + 7 * 24 * 3600,
+            },
+        }
+        self.assertTrue(USAGE._codex_keep_log_week(log, live, now))
+
+    def test_take_live_week_when_live_has_real_usage(self):
+        now = 1_000_000
+        log = {
+            "primary": {
+                "used_percent": 18.0,
+                "window_minutes": 10080,
+                "resets_at": now + 76 * 3600,
+            },
+        }
+        live = {
+            "primary": {
+                "used_percent": 19.0,
+                "window_minutes": 10080,
+                "resets_at": now + 76 * 3600,
+            },
+        }
+        self.assertFalse(USAGE._codex_keep_log_week(log, live, now))
+
+    def test_take_live_week_when_log_window_already_ended(self):
+        now = 1_000_000
+        log = {
+            "primary": {
+                "used_percent": 90.0,
+                "window_minutes": 10080,
+                "resets_at": now - 10,
+            },
+        }
+        live = {
+            "primary": {
+                "used_percent": 0.0,
+                "window_minutes": 10080,
+                "resets_at": now + 7 * 24 * 3600,
+            },
+        }
+        self.assertFalse(USAGE._codex_keep_log_week(log, live, now))
+
     def test_live_quota_rejects_cross_origin_redirect(self):
         payload = {
             "rate_limit": {
