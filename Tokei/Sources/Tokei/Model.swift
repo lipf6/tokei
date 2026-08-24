@@ -832,8 +832,17 @@ enum Fmt {
         guard let e = epoch else { return "?" }
         let s = TimeInterval(e) - Date().timeIntervalSince1970
         if s <= 0 { return "即将重置" }
-        let h = Int(s) / 3600, m = (Int(s) % 3600) / 60
-        return h > 0 ? "\(h)h\(m)m" : "\(m)m"
+        let totalMinutes = Int(s) / 60
+        let days = totalMinutes / (24 * 60)
+        let hours = totalMinutes / 60 % 24
+        let minutes = totalMinutes % 60
+        if days > 0 {
+            return hours > 0 ? "\(days)天\(hours)小时" : "\(days)天"
+        }
+        if hours > 0 {
+            return minutes > 0 ? "\(hours)小时\(minutes)分钟" : "\(hours)小时"
+        }
+        return minutes > 0 ? "\(minutes)分钟" : "不到1分钟"
     }
 
     static func duration(_ ms: Int) -> String {

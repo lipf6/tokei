@@ -264,7 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
     static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
-    static let kimiColor   = NSColor(red: 0.38, green: 0.70, blue: 0.98, alpha: 1)
+    static let kimiColor   = NSColor(red: 0.56, green: 0.58, blue: 0.98, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
