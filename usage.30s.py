@@ -2626,18 +2626,10 @@ def scan_codex(bounds, cache):
     live = fetch_codex_live_limits()
     if live:
         live_limits, live_plan, live_updated = live
-        now_epoch = int(datetime.now().timestamp())
-        keep_log_week = (
-            latest_limits is not None
-            and _codex_keep_log_week(latest_limits, live_limits, now_epoch)
-        )
-        if (not keep_log_week) and _codex_live_snapshot_is_current(
-                live_updated, selected_limits_ts):
+        if _codex_live_snapshot_is_current(live_updated, selected_limits_ts):
             latest_limits = live_limits
             plan_type = live_plan or (live_limits or {}).get("plan_type") or plan_type
             limits_updated = int(live_updated)
-
-    latest_limits = _codex_reconcile_week_limits(latest_limits, fc, int(datetime.now().timestamp()))
 
     # 窗口翻篇后本机又消耗了多少 —— 用来区分「确实回满了」和「读数已经失真」。
     # now_epoch=0 让映射函数只做槽位归类,不触发过期处理。
@@ -2689,98 +2681,6 @@ def _codex_used_since(days, since_epoch):
         # 没有小时分布(老账本条目)就整天算,保守方向是宁多勿少
         total += sum(int(h or 0) for h in hours[start.hour:24]) if hours else whole_day
     return total
-
-
-def _codex_week_slot(limits):
-    """只做 5h/周槽位归类,不处理过期。"""
-    values = _codex_quota_values(limits, now_epoch=0)
-    return values.get("pw"), values.get("rw")
-
-
-def _codex_keep_log_week(log_limits, live_limits, now_epoch):
-    """官方 usage 在窗口没翻完时会报 used=0、reset=now+7d,盖掉日志里仍有效的周额度。
-
-    周期卡已经用 max_used>=2 滤掉这种漂锚;主卡必须同样拒绝,否则会显示
-    「周剩余 100% · 七天后」而实际这周已经用过。
-    """
-    live_used, _live_reset = _codex_week_slot(live_limits)
-    log_used, log_reset = _codex_week_slot(log_limits)
-    try:
-        live_used = float(live_used) if live_used is not None else None
-        log_used = float(log_used) if log_used is not None else None
-        log_reset = float(log_reset) if log_reset is not None else None
-    except (TypeError, ValueError, OverflowError):
-        return False
-    if live_used is None or live_used >= 2:
-        return False
-    return bool(log_used is not None and log_used >= 2 and log_reset and log_reset > now_epoch)
-
-
-def _codex_active_week_from_cache(file_cache, now_epoch):
-    """在全部会话缓存里找仍在进行、且真正用过的周窗口。
-
-    最新一条 rate_limits 经常是官方 usage 的空窗(used=0, reset=now+7d),
-    只看最新一条会把 8 月 27 日那个还有效的窗口丢掉。
-    """
-    best = None
-    for entry in (file_cache or {}).values():
-        if not isinstance(entry, dict):
-            continue
-        for key, ts_key in (("limits", "limits_ts"), ("g_limits", "g_ts")):
-            used, reset = _codex_week_slot(entry.get(key))
-            try:
-                used = float(used) if used is not None else None
-                reset = float(reset) if reset is not None else None
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if used is None or reset is None or used < 2 or reset <= now_epoch:
-                continue
-            ts_epoch = _iso_to_epoch(entry.get(ts_key)) or 0
-            if best is None or ts_epoch > best[0] or (ts_epoch == best[0] and used > best[1]):
-                best = (ts_epoch, used, reset)
-    if best is None:
-        return None
-    return best[1], best[2]
-
-
-def _codex_patch_week(limits, used, reset):
-    out = dict(limits) if isinstance(limits, dict) else {}
-    patched = False
-    for slot_name in ("primary", "secondary"):
-        slot = out.get(slot_name)
-        if not isinstance(slot, dict):
-            continue
-        minutes = slot.get("window_minutes")
-        is_week = minutes == 7 * 24 * 60 or (minutes is None and slot_name == "secondary")
-        if not is_week:
-            continue
-        slot = dict(slot)
-        slot["used_percent"] = used
-        slot["resets_at"] = int(reset)
-        out[slot_name] = slot
-        patched = True
-    if not patched:
-        out["primary"] = {
-            "used_percent": used,
-            "window_minutes": 7 * 24 * 60,
-            "resets_at": int(reset),
-        }
-    return out
-
-
-def _codex_reconcile_week_limits(limits, file_cache, now_epoch):
-    used, reset = _codex_week_slot(limits)
-    try:
-        used = float(used) if used is not None else None
-        reset = float(reset) if reset is not None else None
-    except (TypeError, ValueError, OverflowError):
-        used, reset = None, None
-    if used is not None and used >= 2 and reset and reset > now_epoch:
-        return limits
-    active = _codex_active_week_from_cache(file_cache, now_epoch)
-    if active is None:
-        return limits
-    return _codex_patch_week(limits if isinstance(limits, dict) else {}, active[0], active[1])
 
 
 def _codex_quota_values(limits, now_epoch=None, consumed=None):
@@ -8669,8 +8569,17 @@ def _quota_anchor_cycles(anchors, tool, span, limit, now):
     照观测顺序切会切出负时长的区间。排序后每段时长天然为正。
     """
     rows = sorted(anchors.get(tool) or [], key=lambda r: int(r.get("reset", 0)))
-    # 窗口空着的时候 reset 会一直跟着 now+7d 漂,那不是真周期,只有用过才算。
-    rows = [r for r in rows if r.get("max_used", 0) >= 2] or rows[-1:]
+    # 用过的窗口才切历史;但官方刚回满时最新一条 used=0、reset 仍在未来,
+    # 那是新周期(ChatGPT 用量页会显示剩余 100%),不能再滤掉。
+    used_rows = [r for r in rows if r.get("max_used", 0) >= 2]
+    latest = rows[-1] if rows else None
+    if latest is not None:
+        latest_reset = int(latest.get("reset", 0) or 0)
+        last_used_reset = int(used_rows[-1]["reset"]) if used_rows else 0
+        if latest_reset > now and (
+                not used_rows or abs(latest_reset - last_used_reset) > _QUOTA_ANCHOR_JITTER):
+            used_rows = list(used_rows) + [latest]
+    rows = used_rows or rows[-1:]
 
     cycles = []
     for index, row in enumerate(rows):

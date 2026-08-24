@@ -84,6 +84,18 @@ class AnchorCyclesTests(unittest.TestCase):
         self.assertTrue(cycles[0][3])
         self.assertEqual(cycles[0][0], 6 * WEEK + 3600 - WEEK)
 
+    def test_official_refill_zero_used_becomes_current_cycle(self):
+        old = 6 * WEEK
+        neu = 6 * WEEK + 4 * 24 * 3600
+        now = 6 * WEEK - 3 * 24 * 3600
+        anchors = {"codex": [_anchor(old, 18.0), _anchor(neu, 0.0)]}
+        cycles = USAGE._quota_anchor_cycles(anchors, "codex", WEEK, 8, now)
+        current = [c for c in cycles if c[3]]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0][1], neu)
+        self.assertEqual(current[0][2], 0.0)
+        self.assertEqual(current[0][0], neu - WEEK)
+
 
 class CycleSpecsTests(unittest.TestCase):
     def _run(self, payload, peer_anchors, now, existing=None):
