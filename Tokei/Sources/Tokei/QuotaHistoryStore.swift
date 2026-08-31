@@ -14,21 +14,19 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
     var claudeWeekRemaining: Double?
     var claudeFableWeekRemaining: Double?
     var codexWeekRemaining: Double?
-    var grokWeekRemaining: Double?
     var kimiFiveHourRemaining: Double?
     var kimiWeekRemaining: Double?
     var claudeActivity: [QuotaModelActivity] = []
     var codexActivity: [QuotaModelActivity] = []
-    var grokActivity: [QuotaModelActivity] = []
     var kimiActivity: [QuotaModelActivity] = []
 
     var id: Int { timestamp }
 
     private enum CodingKeys: String, CodingKey {
         case timestamp, claudeFiveHourRemaining, claudeWeekRemaining
-        case claudeFableWeekRemaining, codexWeekRemaining, grokWeekRemaining
+        case claudeFableWeekRemaining, codexWeekRemaining
         case kimiFiveHourRemaining, kimiWeekRemaining
-        case claudeActivity, codexActivity, grokActivity, kimiActivity
+        case claudeActivity, codexActivity, kimiActivity
     }
 
     init(
@@ -37,12 +35,10 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
         claudeWeekRemaining: Double?,
         claudeFableWeekRemaining: Double?,
         codexWeekRemaining: Double?,
-        grokWeekRemaining: Double? = nil,
         kimiFiveHourRemaining: Double? = nil,
         kimiWeekRemaining: Double? = nil,
         claudeActivity: [QuotaModelActivity] = [],
         codexActivity: [QuotaModelActivity] = [],
-        grokActivity: [QuotaModelActivity] = [],
         kimiActivity: [QuotaModelActivity] = []
     ) {
         self.timestamp = timestamp
@@ -50,12 +46,10 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
         self.claudeWeekRemaining = claudeWeekRemaining
         self.claudeFableWeekRemaining = claudeFableWeekRemaining
         self.codexWeekRemaining = codexWeekRemaining
-        self.grokWeekRemaining = grokWeekRemaining
         self.kimiFiveHourRemaining = kimiFiveHourRemaining
         self.kimiWeekRemaining = kimiWeekRemaining
         self.claudeActivity = claudeActivity
         self.codexActivity = codexActivity
-        self.grokActivity = grokActivity
         self.kimiActivity = kimiActivity
     }
 
@@ -67,28 +61,12 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
             claudeWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .claudeWeekRemaining),
             claudeFableWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .claudeFableWeekRemaining),
             codexWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .codexWeekRemaining),
-            grokWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .grokWeekRemaining),
             kimiFiveHourRemaining: try container.decodeIfPresent(Double.self, forKey: .kimiFiveHourRemaining),
             kimiWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .kimiWeekRemaining),
             claudeActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .claudeActivity) ?? [],
             codexActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .codexActivity) ?? [],
-            grokActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .grokActivity) ?? [],
             kimiActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .kimiActivity) ?? []
         )
-    }
-
-    func hasTrajectory(for tool: QuotaHistoryTool) -> Bool {
-        switch tool {
-        case .claude:
-            return claudeFiveHourRemaining != nil || claudeWeekRemaining != nil
-                || claudeFableWeekRemaining != nil || !claudeActivity.isEmpty
-        case .codex:
-            return codexWeekRemaining != nil || !codexActivity.isEmpty
-        case .grok:
-            return grokWeekRemaining != nil || !grokActivity.isEmpty
-        case .kimi:
-            return kimiWeekRemaining != nil || kimiFiveHourRemaining != nil || !kimiActivity.isEmpty
-        }
     }
 }
 
@@ -97,12 +75,10 @@ struct QuotaCapture {
     var claudeWeekRemaining: Double?
     var claudeFableWeekRemaining: Double?
     var codexWeekRemaining: Double?
-    var grokWeekRemaining: Double?
     var kimiFiveHourRemaining: Double?
     var kimiWeekRemaining: Double?
     var claudeModelTotals: [String: Int]
     var codexModelTotals: [String: Int]
-    var grokModelTotals: [String: Int]
     var kimiModelTotals: [String: Int]
 
     init(
@@ -110,24 +86,20 @@ struct QuotaCapture {
         claudeWeekRemaining: Double? = nil,
         claudeFableWeekRemaining: Double? = nil,
         codexWeekRemaining: Double? = nil,
-        grokWeekRemaining: Double? = nil,
         kimiFiveHourRemaining: Double? = nil,
         kimiWeekRemaining: Double? = nil,
         claudeModelTotals: [String: Int] = [:],
         codexModelTotals: [String: Int] = [:],
-        grokModelTotals: [String: Int] = [:],
         kimiModelTotals: [String: Int] = [:]
     ) {
         self.claudeFiveHourRemaining = claudeFiveHourRemaining
         self.claudeWeekRemaining = claudeWeekRemaining
         self.claudeFableWeekRemaining = claudeFableWeekRemaining
         self.codexWeekRemaining = codexWeekRemaining
-        self.grokWeekRemaining = grokWeekRemaining
         self.kimiFiveHourRemaining = kimiFiveHourRemaining
         self.kimiWeekRemaining = kimiWeekRemaining
         self.claudeModelTotals = claudeModelTotals
         self.codexModelTotals = codexModelTotals
-        self.grokModelTotals = grokModelTotals
         self.kimiModelTotals = kimiModelTotals
     }
 }
@@ -137,22 +109,18 @@ private struct QuotaHistoryState: Codable {
     var points: [QuotaHistoryPoint] = []
     var lastClaudeModelTotals: [String: Int] = [:]
     var lastCodexModelTotals: [String: Int] = [:]
-    var lastGrokModelTotals: [String: Int] = [:]
     var lastKimiModelTotals: [String: Int] = [:]
     var hasClaudeBaseline = false
     var hasCodexBaseline = false
-    var hasGrokBaseline = false
     var hasKimiBaseline = false
     var claudeBaselineDay: Int?
     var codexBaselineDay: Int?
-    var grokBaselineDay: Int?
     var kimiBaselineDay: Int?
 
     private enum CodingKeys: String, CodingKey {
-        case version, points, lastClaudeModelTotals, lastCodexModelTotals
-        case lastGrokModelTotals, lastKimiModelTotals
-        case hasClaudeBaseline, hasCodexBaseline, hasGrokBaseline, hasKimiBaseline
-        case claudeBaselineDay, codexBaselineDay, grokBaselineDay, kimiBaselineDay
+        case version, points, lastClaudeModelTotals, lastCodexModelTotals, lastKimiModelTotals
+        case hasClaudeBaseline, hasCodexBaseline, hasKimiBaseline
+        case claudeBaselineDay, codexBaselineDay, kimiBaselineDay
     }
 
     init() {}
@@ -163,15 +131,12 @@ private struct QuotaHistoryState: Codable {
         points = try container.decodeIfPresent([QuotaHistoryPoint].self, forKey: .points) ?? []
         lastClaudeModelTotals = try container.decodeIfPresent([String: Int].self, forKey: .lastClaudeModelTotals) ?? [:]
         lastCodexModelTotals = try container.decodeIfPresent([String: Int].self, forKey: .lastCodexModelTotals) ?? [:]
-        lastGrokModelTotals = try container.decodeIfPresent([String: Int].self, forKey: .lastGrokModelTotals) ?? [:]
         lastKimiModelTotals = try container.decodeIfPresent([String: Int].self, forKey: .lastKimiModelTotals) ?? [:]
         hasClaudeBaseline = try container.decodeIfPresent(Bool.self, forKey: .hasClaudeBaseline) ?? false
         hasCodexBaseline = try container.decodeIfPresent(Bool.self, forKey: .hasCodexBaseline) ?? false
-        hasGrokBaseline = try container.decodeIfPresent(Bool.self, forKey: .hasGrokBaseline) ?? false
         hasKimiBaseline = try container.decodeIfPresent(Bool.self, forKey: .hasKimiBaseline) ?? false
         claudeBaselineDay = try container.decodeIfPresent(Int.self, forKey: .claudeBaselineDay)
         codexBaselineDay = try container.decodeIfPresent(Int.self, forKey: .codexBaselineDay)
-        grokBaselineDay = try container.decodeIfPresent(Int.self, forKey: .grokBaselineDay)
         kimiBaselineDay = try container.decodeIfPresent(Int.self, forKey: .kimiBaselineDay)
     }
 }
@@ -220,12 +185,6 @@ final class QuotaHistoryStore: ObservableObject {
             baselineDay: state.codexBaselineDay,
             currentDay: day
         )
-        let grokBaseline = prepareBaseline(
-            previous: state.lastGrokModelTotals,
-            hasBaseline: state.hasGrokBaseline,
-            baselineDay: state.grokBaselineDay,
-            currentDay: day
-        )
         let kimiBaseline = prepareBaseline(
             previous: state.lastKimiModelTotals,
             hasBaseline: state.hasKimiBaseline,
@@ -241,11 +200,6 @@ final class QuotaHistoryStore: ObservableObject {
             current: capture.codexModelTotals,
             previous: codexBaseline.previous,
             hasBaseline: codexBaseline.hasBaseline
-        )
-        let grokActivity = activity(
-            current: capture.grokModelTotals,
-            previous: grokBaseline.previous,
-            hasBaseline: grokBaseline.hasBaseline
         )
         let kimiActivity = activity(
             current: capture.kimiModelTotals,
@@ -273,16 +227,6 @@ final class QuotaHistoryStore: ObservableObject {
         state.hasCodexBaseline = nextCodexBaseline.hasBaseline
         state.codexBaselineDay = nextCodexBaseline.day
 
-        let nextGrokBaseline = updatedBaseline(
-            current: capture.grokModelTotals,
-            prepared: grokBaseline,
-            existingDay: state.grokBaselineDay,
-            currentDay: day
-        )
-        state.lastGrokModelTotals = nextGrokBaseline.totals
-        state.hasGrokBaseline = nextGrokBaseline.hasBaseline
-        state.grokBaselineDay = nextGrokBaseline.day
-
         let nextKimiBaseline = updatedBaseline(
             current: capture.kimiModelTotals,
             prepared: kimiBaseline,
@@ -299,12 +243,10 @@ final class QuotaHistoryStore: ObservableObject {
             claudeWeekRemaining: normalized(capture.claudeWeekRemaining),
             claudeFableWeekRemaining: normalized(capture.claudeFableWeekRemaining),
             codexWeekRemaining: normalized(capture.codexWeekRemaining),
-            grokWeekRemaining: normalized(capture.grokWeekRemaining),
             kimiFiveHourRemaining: normalized(capture.kimiFiveHourRemaining),
             kimiWeekRemaining: normalized(capture.kimiWeekRemaining),
             claudeActivity: claudeActivity,
             codexActivity: codexActivity,
-            grokActivity: grokActivity,
             kimiActivity: kimiActivity
         )
 
@@ -312,12 +254,10 @@ final class QuotaHistoryStore: ObservableObject {
             incoming.claudeWeekRemaining != nil ||
             incoming.claudeFableWeekRemaining != nil ||
             incoming.codexWeekRemaining != nil ||
-            incoming.grokWeekRemaining != nil ||
             incoming.kimiFiveHourRemaining != nil ||
             incoming.kimiWeekRemaining != nil ||
             !incoming.claudeActivity.isEmpty ||
             !incoming.codexActivity.isEmpty ||
-            !incoming.grokActivity.isEmpty ||
             !incoming.kimiActivity.isEmpty
 
         if hasUsefulData {
@@ -333,8 +273,7 @@ final class QuotaHistoryStore: ObservableObject {
             }
         }
 
-        if changed || nextClaudeBaseline.changed || nextCodexBaseline.changed
-            || nextGrokBaseline.changed || nextKimiBaseline.changed {
+        if changed || nextClaudeBaseline.changed || nextCodexBaseline.changed || nextKimiBaseline.changed {
             state.points = points
             saveState()
         }
@@ -444,15 +383,12 @@ final class QuotaHistoryStore: ObservableObject {
             incoming.claudeFableWeekRemaining ?? existing.claudeFableWeekRemaining
         merged.codexWeekRemaining =
             incoming.codexWeekRemaining ?? existing.codexWeekRemaining
-        merged.grokWeekRemaining =
-            incoming.grokWeekRemaining ?? existing.grokWeekRemaining
         merged.kimiFiveHourRemaining =
             incoming.kimiFiveHourRemaining ?? existing.kimiFiveHourRemaining
         merged.kimiWeekRemaining =
             incoming.kimiWeekRemaining ?? existing.kimiWeekRemaining
         merged.claudeActivity = mergeActivity(existing.claudeActivity, incoming.claudeActivity)
         merged.codexActivity = mergeActivity(existing.codexActivity, incoming.codexActivity)
-        merged.grokActivity = mergeActivity(existing.grokActivity, incoming.grokActivity)
         merged.kimiActivity = mergeActivity(existing.kimiActivity, incoming.kimiActivity)
         return merged
     }
@@ -470,46 +406,5 @@ final class QuotaHistoryStore: ObservableObject {
                 if $0.tokenDelta == $1.tokenDelta { return $0.model < $1.model }
                 return $0.tokenDelta > $1.tokenDelta
             }
-    }
-}
-
-/// 按当前已用比例外推：周期结束时还剩多少、额度会不会在回满前见底。
-struct QuotaPaceForecast: Equatable {
-    /// 到回满时刻预计剩余百分比；超支为负数。
-    var remainingAtReset: Double
-    /// 按现在节奏把剩余额度用完还要几天（不考虑回满）。
-    var daysUntilEmpty: Double
-    /// 距本周期回满还有几天。
-    var daysUntilReset: Double
-
-    var willExhaustBeforeReset: Bool { daysUntilEmpty < daysUntilReset }
-}
-
-enum QuotaPace {
-    static let minUsedPercent = 3.0
-    static let minElapsed: TimeInterval = 3600
-
-    static func forecast(
-        usedPercent: Double,
-        start: Int,
-        end: Int,
-        now: Int
-    ) -> QuotaPaceForecast? {
-        guard usedPercent.isFinite, usedPercent >= minUsedPercent else { return nil }
-        let elapsed = Double(now - start)
-        let span = Double(end - start)
-        guard elapsed >= minElapsed, span > 0, now < end, now > start else { return nil }
-        let projectedUsed = usedPercent * span / elapsed
-        let remainingAtReset = 100 - projectedUsed
-        let daysUntilReset = Double(end - now) / 86_400
-        let leftover = max(100 - usedPercent, 0)
-        let daysUntilEmpty = leftover == 0
-            ? 0
-            : leftover / usedPercent * (elapsed / 86_400)
-        return QuotaPaceForecast(
-            remainingAtReset: remainingAtReset,
-            daysUntilEmpty: daysUntilEmpty,
-            daysUntilReset: daysUntilReset
-        )
     }
 }

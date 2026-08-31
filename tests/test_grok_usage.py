@@ -46,17 +46,12 @@ class GrokUsageTests(unittest.TestCase):
         self.old_dir = USAGE.GROK_DIR
         self.old_log = USAGE.GROK_LOG
         self.old_cache = USAGE._SCAN_CACHE_FILE
-        self.old_ledger = USAGE._LEDGER_FILE
-        self.ledger_dir = tempfile.TemporaryDirectory()
-        USAGE._LEDGER_FILE = str(Path(self.ledger_dir.name) / "ledger.json")
 
     def tearDown(self):
         USAGE.GROK_HOME = self.old_home
         USAGE.GROK_DIR = self.old_dir
         USAGE.GROK_LOG = self.old_log
         USAGE._SCAN_CACHE_FILE = self.old_cache
-        USAGE._LEDGER_FILE = self.old_ledger
-        self.ledger_dir.cleanup()
 
     def configure(self, root):
         USAGE.GROK_HOME = str(root)

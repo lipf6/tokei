@@ -15,6 +15,9 @@ final class Store: ObservableObject {
     @Published var syncDetail = ""
     @Published var syncFailStreak = 0
     @Published var peerLoadIssues: [PeerLoadIssue] = []
+    // popover 的视图树启动时建好后就不再释放,面板关上也还活着。
+    // 动画类视图得靠这个标志判断自己是不是真的能被看见。
+    @Published var popoverVisible = false
 
     let syncManager = SyncManager()
     let quotaHistory = QuotaHistoryStore.shared
@@ -52,7 +55,7 @@ final class Store: ObservableObject {
             }
         }
         allDevicesUsage = allDevices
-        applyDisplayMode()
+        applyDisplayMode(updateStatusTitle: false)
         lastUpdated = "缓存数据 · 后台更新中"
     }
 
@@ -145,24 +148,15 @@ final class Store: ObservableObject {
             totals[model.name, default: 0] +=
                 model.in + model.out + model.cr + model.cw + model.reason
         }
-        let grokRange = usage.grok.ranges.get(.today)
-        var grokModels = grokRange.models.reduce(into: [String: Int]()) { totals, model in
-            totals[model.name, default: 0] +=
-                model.in + model.out + model.cr + model.cw + model.reason
-        }
-        if grokModels.isEmpty, grokRange.tokens > 0 {
-            grokModels[usage.grok.model ?? "Grok"] = grokRange.tokens
-        }
-        let kimiRange = usage.kimi.ranges.get(.today)
+        let kimiRange = usage.kimicode.ranges.get(.today)
         let kimiModels = kimiRange.models.reduce(into: [String: Int]()) { totals, model in
             guard model.name != "合成" else { return }
             totals[model.name, default: 0] +=
                 model.in + model.out + model.cr + model.cw + model.reason
         }
-        let kimiFiveHour = usage.kimi.limits.first {
+        let kimiFiveHour = usage.kimicode.limits.first {
             $0.duration == 5 && $0.unit == "hour"
         }
-        let grokIsWeekly = usage.grok.window == nil || usage.grok.window == "week"
         quotaHistory.record(QuotaCapture(
             claudeFiveHourRemaining: usage.claude.q5_stale == true
                 ? nil : usage.claude.q5.map { 100 - $0 },
@@ -172,15 +166,12 @@ final class Store: ObservableObject {
                 ? nil : usage.claude.qf.map { 100 - $0 },
             codexWeekRemaining: usage.codex.pw_stale == true
                 ? nil : usage.codex.pw.map { 100 - $0 },
-            grokWeekRemaining: (usage.grok.stale == true || !grokIsWeekly)
-                ? nil : usage.grok.pct.map { 100 - $0 },
-            kimiFiveHourRemaining: usage.kimi.q_stale == true
+            kimiFiveHourRemaining: usage.kimicode.q_stale == true
                 ? nil : kimiFiveHour?.usedPercent.map { 100 - $0 },
-            kimiWeekRemaining: usage.kimi.q_stale == true
-                ? nil : usage.kimi.weekly?.usedPercent.map { 100 - $0 },
+            kimiWeekRemaining: usage.kimicode.q_stale == true
+                ? nil : usage.kimicode.weekly?.usedPercent.map { 100 - $0 },
             claudeModelTotals: claudeModels,
             codexModelTotals: codexModels,
-            grokModelTotals: grokModels,
             kimiModelTotals: kimiModels
         ))
     }
@@ -246,7 +237,7 @@ final class Store: ObservableObject {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let store = Store()
     var statusItem: NSStatusItem!
     var popover = NSPopover()
@@ -264,7 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
     static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
-    static let kimiColor   = NSColor(red: 0.56, green: 0.58, blue: 0.98, alpha: 1)
+    static let kimiColor   = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -280,12 +271,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = host
         popover.behavior = .applicationDefined
         popover.animates = true
+        popover.delegate = self
 
-        // 启动时先把 Qoder IDE / Grok 实时额度开关落盘到 config.json,
+        // 启动时先把 Qoder IDE / Grok / Kimi / 千问办公额度开关落盘到 config.json,
         // 确保随后的 refresh() 触发的 Python 扫描能读到正确配置。
         PanelView.syncQoderIdeConfigOnLaunch()
         PanelView.syncGrokLiveQuotaConfigOnLaunch()
         PanelView.syncKimiLiveQuotaConfigOnLaunch()
+        PanelView.syncQwenWorkQuotaConfigOnLaunch()
+        PanelView.syncProviderQuotaConfigOnLaunch()
         if var syncConfig = store.syncManager.config {
             let interval = SyncManager.normalizedSyncInterval(syncConfig.sync_interval)
             if syncConfig.sync_interval != interval {
@@ -331,35 +325,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let u = store.usage {
             let ud = UserDefaults.standard
-            // 菜单栏额度来源与「显示卡片」独立：卡片可开，但状态栏只显示用户勾选的来源。
-            if MenuBarQuotaSource.claude.isEnabled,
-               u.claude.q5_stale != true,
-               let q5 = u.claude.q5 {
-                let remaining = 100 - q5
-                metrics.append(.init(kind: .claude, value: String(format: "%.0f", remaining),
-                                     remaining: remaining))
-            }
-            if MenuBarQuotaSource.codex.isEnabled,
-               u.codex.pw_stale != true,
-               let quota = u.codex.pw {
-                let remaining = 100 - quota
-                metrics.append(.init(kind: .codex, value: String(format: "%.0f", remaining),
-                                     remaining: remaining))
-            }
-            if MenuBarQuotaSource.grok.isEnabled,
-               u.grok.stale != true,
-               let pct = u.grok.pct {
-                let remaining = 100 - pct
-                metrics.append(.init(kind: .grok, value: String(format: "%.0f", remaining),
-                                     remaining: remaining))
-            }
-            if MenuBarQuotaSource.kimi.isEnabled,
-               u.kimi.q_stale != true,
-               let pct = u.kimi.weekly?.usedPercent {
-                let remaining = 100 - pct
-                metrics.append(.init(kind: .kimi, value: String(format: "%.0f", remaining),
-                                     remaining: remaining))
-            }
+            // 菜单栏额度来源与「显示卡片」独立：卡片可开，但状态栏只显示用户勾选的窗口。
+            metrics = MenuBarQuotaSource.metrics(in: u)
             if metrics.isEmpty {
                 // 用户把额度来源全部关掉时：只保留图标，不再回退显示今日 token 总量。
                 let anyQuotaSourceOn = MenuBarQuotaSource.allCases.contains { $0.isEnabled }
@@ -370,9 +337,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let showX = ud.object(forKey: "showCodex") as? Bool ?? true
                     let showP = ud.object(forKey: "showPi") as? Bool ?? true
                     let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
+                    let showD = ud.object(forKey: "showDeepSeekHarness") as? Bool ?? true
                     let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
                     let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
-                    let showK = ud.object(forKey: "showKimi") as? Bool ?? true
                     let showQ = ud.object(forKey: "showQoderIde") as? Bool ?? false
                     let showZ = ud.object(forKey: "showZcode") as? Bool ?? true
                     let showM = ud.object(forKey: "showMimoCode") as? Bool ?? true
@@ -381,9 +348,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
                     if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
+                    if showD { let r = u.deepseekHarness.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
-                    if showK { let r = u.kimi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                     if showQ { let r = u.qoder.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
                     if showZ { let r = u.zcode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showM { let r = u.mimocode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
@@ -426,14 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         b.contentTintColor = nil
         fitStatusItemWidth(b)
         var summaryParts = displayedMetrics.map { metric in
-            let name: String
-            switch metric.kind {
-            case .claude: name = "Claude"
-            case .codex: name = "Codex"
-            case .grok: name = "Grok"
-            case .kimi: name = "Kimi"
-            case .total: name = "今日"
-            }
+            let name = metric.kind.displayName
             if metric.remaining != nil {
                 return "\(name) 剩余 \(metric.value)%"
             }
@@ -502,6 +462,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
+    }
+
+    func popoverDidShow(_ notification: Notification) {
+        store.popoverVisible = true
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        store.popoverVisible = false
     }
 }
 

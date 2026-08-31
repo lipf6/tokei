@@ -3,8 +3,8 @@
   <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 5.9+">
   <img src="https://img.shields.io/badge/python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.8+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License">
-  <a href="https://github.com/lipf6/tokei/stargazers"><img src="https://img.shields.io/github/stars/lipf6/tokei?style=flat-square&color=yellow" alt="Stars"></a>
-  <a href="https://github.com/lipf6/tokei/releases"><img src="https://img.shields.io/github/v/release/lipf6/tokei?style=flat-square&color=blue" alt="Release"></a>
+  <a href="https://github.com/cclank/tokei/stargazers"><img src="https://img.shields.io/github/stars/cclank/tokei?style=flat-square&color=yellow" alt="Stars"></a>
+  <a href="https://github.com/cclank/tokei/releases"><img src="https://img.shields.io/github/v/release/cclank/tokei?style=flat-square&color=blue" alt="Release"></a>
 </p>
 
 <h1 align="center">⏱ Tokei 知度</h1>
@@ -12,14 +12,14 @@
 <p align="center">
   <strong>macOS 菜单栏 AI 编程用量监控</strong><br>
   <sub>了然于心，掌控全局。</sub><br><br>
-  <a href="https://tokei.lanshuagent.com">🌐 原项目官网</a> · <a href="https://github.com/lipf6/tokei/releases/latest">⬇️ 下载 Kimi 版</a> · <a href="#english">English</a>
+  <a href="https://tokei.lanshuagent.com">🌐 官网</a> · <a href="https://github.com/cclank/tokei/releases/latest">⬇️ 下载</a> · <a href="#english">English</a>
 </p>
 
 ---
 
 ## 什么是 Tokei？
 
-Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编程工具** 上的用量、成本和性能。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态。
+Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具的用量、成本和额度。Token 统计以本地日志为主，额度查询使用对应工具已有的本机登录态或用户明确保存的 API Key。
 
 ### 支持的工具
 
@@ -27,17 +27,29 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编�
 |------|----------|
 | **Claude Code** | Token（输入/输出/缓存）、成本、配额、模型 |
 | **Codex CLI** | Token、成本、配额、会话 |
-| **Gemini CLI** | Token、思考量、成本、模型 |
+| **Gemini / Antigravity CLI** | Token、思考量、成本、模型 |
+| **Cursor** | 账号 Token、请求、API 价成本、按模型统计、套餐额度与 Grok Bot 周额度 |
+| **Zed** | Edit Predictions、订阅周期、账号与套餐 |
+| **Sub2API** | 日/周/月额度、限流窗口、余额、请求与 Token 摘要 |
+| **z.ai / GLM** | 近 30 天账号 Token、按模型统计、会话/周期/MCP 额度、BigModel CN 余额 |
 | **Grok Build** | Token（输入/输出/缓存/推理）、会话、上下文、延迟、配额（本地日志；可选实时） |
+| **Qoder Desktop** | Token、缓存、会话、调用次数、模型 |
+| **QoderWork** | Token、调用次数、子 Agent、时长、上下文 |
+| **Qoder CLI** | 会话、调用、工具、活跃时长、估算 Token |
 | **Hermes** | Token、成本、缓存命中率、模型 |
+| **ZCode** | Token（输入/输出/缓存/推理）、成本、模型 |
+| **MiMoCode** | Token（输入/输出/缓存/推理）、成本、模型 |
 | **OpenClaw** | Token、成本、任务、模型 |
 | **Pi Coding Agent CLI** | Token、成本、缓存命中率、模型、项目 |
+| **Prime Agent** | Token、成本、缓存命中率、模型、项目（含 RLM 子代理） |
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
+| **DeepSeek Harness** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
-| **Kimi Code** | Token（输入/输出/缓存）、模型、会话、项目、周/5 小时额度、Extra Usage |
+| **千问办公（QwenWork）** | 套餐与加购积分余额、团队共享资源包 |
 | **Qoder** | Token、调用次数、配额 |
 | **QoderWork** | Token、调用次数、配额 |
+| **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目、周/5 小时额度、Extra Usage |
 
 ## 功能一览
 
@@ -63,7 +75,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编�
 - 随时切换，对比不同时段用量趋势
 
 ### 项目追踪
-- 按项目维度查看 Claude Code / Pi / WorkBuddy / Grok Build / Kimi Code 用量
+- 按项目维度查看 Claude Code / Pi / WorkBuddy / Grok Build 用量
 - 了解每个项目消耗了多少 Token 和成本
 
 ### 多设备同步
@@ -81,14 +93,21 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编�
 - 可自定义间隔时间
 
 ### 隐私优先
-- Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据
+- 核心 Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据；Cursor 与 z.ai 还可读取对应 Provider 返回的账号级 Token/模型摘要
 - Codex 额度使用本机 Codex 登录态读取官方接口；重置卡每天最多自动查询一次
 - Grok 实时额度默认关闭，可选择只读本地日志
-- 其余联网操作仅用于检查/下载更新，以及手动更新模型价格表
+- 千问办公额度默认关闭；开启后仅调用官方桌面端的 `127.0.0.1` MCP，由已运行并登录的千问办公查询官方额度
+- Tokei 不读取或解密千问办公的 `auth-v2.dat`、浏览器 Cookie 或 `.status.json` 账号资料；仅用 `.status.json` 文件元数据使切换账号后的额度缓存失效，也不会自动启动千问办公
+- Cursor、Zed、Sub2API、z.ai 卡片默认关闭；开启后才查询额度。Sub2API 与 z.ai API Key 保存于 macOS Keychain，不写入 `config.json` 或额度缓存
+- Cursor 只读取 Cursor.app 的本地登录态数据库；Zed 以禁止交互的方式读取现有 Keychain 登录态，不会弹出授权框
+- Cursor 与 z.ai 的账号级统计在 Dashboard 中单独展示，不并入本地工具总计，避免与 Claude Code 等本地日志重复计算
+- Antigravity 额度只连接已运行客户端的 `127.0.0.1` language server，不会自动启动客户端
+- 这 5 个 Provider 的额度与账号标签只保存在本机缓存，不写入多设备 Git 同步快照
+- 其他联网操作包括检查/下载更新，以及手动更新模型价格表
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/lipf6/tokei/releases/latest) 下载最新 DMG
+1. 从 [GitHub Releases](https://github.com/cclank/tokei/releases/latest) 下载最新 DMG
 2. 打开 DMG，将 Tokei.app 拖入 Applications 文件夹
 3. 首次打开如被 macOS 拦截，在终端运行：`sudo xattr -rd com.apple.quarantine /Applications/Tokei.app`
 4. 打开 Tokei 即可
@@ -97,11 +116,18 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪你在 **13 款 AI 编�
 <summary>从源码构建</summary>
 
 ```bash
-git clone https://github.com/lipf6/tokei.git
+git clone https://github.com/cclank/tokei.git
 cd tokei/Tokei
 bash package.sh
 open Tokei.app
 ```
+
+`package.sh` 会优先使用本机可用的 Developer ID / Apple Development
+证书，让 Keychain 中的 Provider 密钥在重复构建后仍可访问；没有证书时会回退到
+ad-hoc 签名。可用 `TOKEI_CODESIGN_IDENTITY=- bash package.sh` 强制 ad-hoc，或用
+`TOKEI_CODESIGN_IDENTITY="证书名称" bash package.sh` 指定签名身份。
+这套自动探测只作用于本地源码构建；官方发布的 DMG 一律是 ad-hoc 签名。
+
 </details>
 
 ## 多设备同步配置
@@ -114,7 +140,7 @@ Tokei 支持通过私有 Git 仓库在多台机器间同步用量数据。
 
 ```bash
 git clone <你的私有仓库> ~/.tokei/sync
-curl -fsSL https://raw.githubusercontent.com/lipf6/tokei/main/usage.30s.py -o ~/.tokei/usage.30s.py
+curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
 echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'","auto_sync":true,"sync_interval":30}' > ~/.tokei/config.json
 cat > ~/.tokei/tokei-sync.sh <<'SH'
 #!/bin/bash
@@ -149,29 +175,41 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ## 数据来源
 
-Token、会话和项目统计来自本地日志。Codex、Kimi 等套餐额度会使用对应 CLI 的本地登录态查询官方额度接口，并做短时本地缓存。
+核心 Token、成本和项目统计来自 **本地日志文件**。额度查询使用对应工具已有的本机登录态或 Keychain API Key；需联网的额度功能会在下表标明。
 
 | 工具 | 日志路径 |
 |------|----------|
 | Claude Code | `~/.claude/projects/<proj>/<session>.jsonl` |
 | Codex CLI | `~/.codex/sessions/YYYY/MM/DD/*.jsonl` |
-| Gemini CLI | `~/.gemini/gemini-cli/conversations/*.json` |
+| Gemini / Antigravity CLI | `~/.gemini/antigravity-cli/conversations/*.db` + `~/.gemini/gemini-cli/conversations/*.json` |
+| Cursor | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` 登录态 + Cursor usage summary / usage-events API（卡片默认关闭） |
+| Zed | `~/.config/zed/settings.json` + Zed Keychain 登录态 + Cloud API（卡片默认关闭） |
+| Sub2API | macOS Keychain API Key + 自定义 Base URL 的 `/v1/usage`（卡片默认关闭） |
+| z.ai / GLM | macOS Keychain API Key + Global/BigModel CN quota / model-usage API（卡片默认关闭） |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl`（含真实 token + billing 额度）+ `sessions/*/*/{summary,signals}.json`；可选实时账单接口（设置里默认关闭） |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
+| Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
-| OpenCode | `~/.opencode/sessions/*.json` |
+| DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
+| OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `storage/message/` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
-| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/**/agents/*/wire.jsonl`；额度读取 `credentials/kimi-code.json` 并查询官方 `/usages` |
+| 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP（默认关闭；需客户端运行且已登录） |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 | QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl`；额度读取 `credentials/kimi-code.json` 并查询官方 `/usages` |
+| Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
+| QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` |
+| Qoder CLI | `~/.qoder/projects/**/*.jsonl` |
+| ZCode | `~/.zcode/cli/db/db.sqlite` |
+| MiMoCode | `~/Library/Application Support/mimocode/mimocode*.db` 或 `~/.local/share/mimocode/mimocode*.db` |
 
 ## 对比 CodexBar
 
 | 功能 | Tokei | [CodexBar](https://github.com/steipete/CodexBar) |
 |------|:-----:|:---------:|
-| 支持工具 | 13 | 40+ |
+| 支持工具 | 20+ | 40+ |
 | Token 级用量分析 | ✅ | — |
 | 成本估算（317 模型） | ✅ | 部分 |
 | 数据面板（图表 + 热力图） | ✅ | — |
@@ -180,85 +218,22 @@ Token、会话和项目统计来自本地日志。Codex、Kimi 等套餐额度�
 | 多设备同步 | ✅ | — |
 | 年度回顾 | ✅ | — |
 | 防休眠 / 久坐提醒 | ✅ | — |
-| 需要联网 | 仅实时额度 | 是 |
-| 需要登录 | 复用对应 CLI 登录态 | 是 |
-| 数据来源 | 本地日志 | 远程 API |
+| 需要联网 | 仅额度查询、更新等功能 | 是 |
+| 需要登录 | 核心统计否；外部额度卡复用已有登录态/API Key | 是 |
+| 数据来源 | 本地日志为主；可选额度 API | 远程 API |
 
-> CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——Token 级分析、成本趋势、项目维度拆分、跨设备同步——全部无需登录。
+> CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——核心 Token 分析、成本趋势、项目维度拆分与跨设备同步仍以本地日志为主；外部额度卡按需复用现有登录态。
+> Cursor、Zed、Sub2API、z.ai 与 Antigravity 额度协议的实现参考了 CodexBar 对应 provider，并按 Tokei 的本地优先、显式开关和统一缓存模型重新实现。
 
 ## 更新日志
 
-### v1.0.34
+### Unreleased
 
-- feat: 周额度首页改为紧凑概览，统一展示当前额度、token、回满时间和消耗节奏，移除含义不清的历史周期区
-- fix: 低用量时说明节奏预测条件，倒计时改为中文天时格式，并用蓝紫色区分 Kimi 与 Codex
-
-### v1.0.33
-
-- fix: Codex 周额度跟 ChatGPT 官方用量页走。官方剩余 100%、重置 08-31 时，不再用旧日志里的 18%/08-27 盖掉；周期卡把 used=0 的新窗口当作当前周期
-
-### v1.0.32
-
-- fix: Codex 周额度不再被日志里最新一条空的 `now+7d` 窗口盖掉，主卡与周期卡都回落到仍在进行的重置日
-- fix: 没用过的工具不再显示「还没有周额度卡片」提示；花不完时去掉与回满倒计时重复的「还能撑 X 天」
-
-### v1.0.31
-
-- fix: Codex 官方 usage 在窗口没翻完时会报 used=0、reset=现在+7 天；主卡不再用这份空读数覆盖日志里仍有效的周额度和重置时间
-
-### v1.0.30
-
-- fix: 周额度节奏预测不再报「还能撑 21 天」这种跨过回满点的天数；花不完写能撑到回满，见底才报预计几天后额度用完
-
-### v1.0.29
-
-- feat: 额度轨迹 Tab 只展示实际有额度或用量的工具，默认落到有数据的项；补齐 Grok 剩余% 采样
-- feat: 周额度当前卡增加节奏预测：到回满预计剩余（超支为负）和按当前节奏还能撑几天
-
-### v1.0.28
-
-- fix: Codex 额度过期后不再伪装成「周剩余 100%」，菜单栏同步隐藏失真读数
-- fix: Codex 实时额度拉取失败时保留最新缓存，并按账号隔离、失败 5 分钟退避
-- fix: Grok 账单周期重置后 protobuf 省略 0% 导致额度卡住
-- fix: 多设备同步 push 前排除 Finder `.DS_Store`，避免垃圾文件卡死同步
-- feat: 账本改为内存对账、单次落盘，统一 token 口径，回顾页增加巅峰日 Top3（含项目回填）
-- feat: 周额度周期改用真实观测锚点，多设备账本合并，轨迹页落盘秒开；Kimi 一并接入
-
-### v1.0.27
-
-- feat: 引入每日高水位账本，日志被 CLI 清理后历史用量不再缩水；Kimi Code 一并接入
-- feat: 账本随多设备同步快照备份，本地账本丢失时可自愈恢复
-- feat: Grok Build 按 API 价估算成本，并进入卡片、数据面板、年度回顾和项目轨迹
-- chore: 附 `scripts/backfill_ledger.py`，可从同步仓 git 历史回填已丢失的每日用量
-
-### v1.0.26
-
-- fix: Codex 日志解析不再依赖 JSON 字段顺序，兼容 `ordinal` 等新增元数据并跳过无时间戳记录
-- perf: 扫描缓存迁移到持久目录并每 5 秒保存重扫进度，升级或中断后可继续扫描
-- fix: 启动时先展示最近一次有效数据，后台刷新期间同步校验 Kimi 额度是否过期
-
-### v1.0.25
-
-- fix: Kimi 周额度或滚动 5 小时额度到达重置时间后，立即失效旧缓存并重新请求官方额度
-- fix: 面板手动刷新跳过 Kimi 额度缓存，直接获取最新额度
-- fix: 刷新任务执行期间再次手动刷新时保留强制刷新请求，避免被并发刷新吞掉
-
-### v1.0.24
-
-- feat: Kimi Code 纳入额度历史轨迹，记录周额度和滚动 5 小时额度变化
-- feat: 额度历史轨迹记录 Kimi 模型活动，并兼容升级前的历史数据
-
-### v1.0.23
-
-- feat: Kimi Code 显示周额度、滚动 5 小时额度、重置时间和 Extra Usage 钱包
-- feat: 按 Kimi Code 官方协议自动续期 OAuth，跨进程加锁并以 `0600` 原子更新凭证
-- privacy: Kimi 额度缓存不保存 access token 或 refresh token；可在设置中关闭，也可设置 `TOKEI_KIMI_LIVE_QUOTA=0`
-
-### v1.0.22
-
-- feat: 支持 Kimi Code 本地 Token、缓存 Token、模型、会话和项目统计
-- feat: Kimi Code 纳入日报、年度回顾、项目轨迹和多设备汇总
-- chore: 更新源和下载入口切换到 `lipf6/tokei`
+- feat(provider): 新增 Cursor、Zed、Sub2API、z.ai / GLM 额度卡
+- feat(provider-usage): Cursor 与 z.ai 新增账号 Token、按模型统计及 Dashboard 独立账号模型区
+- fix(antigravity): 兼容新版会话库把生成时间迁移到 `steps.metadata` 后的 Token 解析
+- feat(antigravity): 在现有 Gemini / Antigravity 卡片中读取本机 language server 额度
+- privacy: 外部 Provider 默认关闭，API Key 存入 macOS Keychain，账号额度不进入 Git 同步快照
 
 ### v1.0.19
 
@@ -392,11 +367,11 @@ Token、会话和项目统计来自本地日志。Codex、Kimi 等套餐额度�
 
 ## English
 
-Tokei is a **macOS menu bar app** that tracks usage, cost, and performance across **13 AI coding tools** in real-time — all from local log files, with zero network traffic.
+Tokei is a **macOS menu bar app** that tracks usage, cost, and quotas across **20+ AI coding tools** in real-time. Usage analytics are local-first; optional quota cards reuse an existing local sign-in or an API key explicitly stored in macOS Keychain.
 
-**Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local logs only) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
+**Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI, Grok Build, Hermes, OpenClaw, Pi Coding Agent CLI, WorkBuddy, OpenCode, Qwen Code, Kimi Code, Qoder, QoderWork
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, QwenWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 

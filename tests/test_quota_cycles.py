@@ -84,17 +84,63 @@ class AnchorCyclesTests(unittest.TestCase):
         self.assertTrue(cycles[0][3])
         self.assertEqual(cycles[0][0], 6 * WEEK + 3600 - WEEK)
 
-    def test_official_refill_zero_used_becomes_current_cycle(self):
-        old = 6 * WEEK
-        neu = 6 * WEEK + 4 * 24 * 3600
-        now = 6 * WEEK - 3 * 24 * 3600
-        anchors = {"codex": [_anchor(old, 18.0), _anchor(neu, 0.0)]}
-        cycles = USAGE._quota_anchor_cycles(anchors, "codex", WEEK, 8, now)
-        current = [c for c in cycles if c[3]]
-        self.assertEqual(len(current), 1)
-        self.assertEqual(current[0][1], neu)
-        self.assertEqual(current[0][2], 0.0)
-        self.assertEqual(current[0][0], neu - WEEK)
+    def test_zero_percent_early_reset_starts_a_new_cycle_immediately(self):
+        old_reset = 6 * WEEK
+        new_reset = old_reset + 4 * 24 * 3600
+        anchors = {"codex": [_anchor(old_reset, 58.0)]}
+
+        USAGE._record_quota_anchor(
+            anchors, "codex", new_reset, 0.0, new_reset - WEEK + 60
+        )
+        cycles = USAGE._quota_anchor_cycles(
+            anchors, "codex", WEEK, 8, new_reset - WEEK + 60
+        )
+
+        self.assertTrue(anchors["codex"][-1]["confirmed_reset"])
+        self.assertEqual(len(cycles), 2)
+        self.assertTrue(cycles[0][3])
+        self.assertEqual(cycles[0][0], new_reset - WEEK)
+        self.assertEqual(cycles[0][2], 0.0)
+        self.assertEqual(cycles[1][1], new_reset - WEEK)
+
+    def test_idle_zero_percent_drift_does_not_open_another_cycle(self):
+        old_reset = 6 * WEEK
+        first_zero_reset = old_reset + 4 * 24 * 3600
+        drifted_reset = first_zero_reset + 3600
+        anchors = {"codex": [_anchor(old_reset, 58.0)]}
+
+        USAGE._record_quota_anchor(
+            anchors, "codex", first_zero_reset, 0.0, first_zero_reset - WEEK
+        )
+        USAGE._record_quota_anchor(
+            anchors, "codex", drifted_reset, 0.0, drifted_reset - WEEK
+        )
+        cycles = USAGE._quota_anchor_cycles(
+            anchors, "codex", WEEK, 8, drifted_reset - WEEK
+        )
+
+        self.assertTrue(anchors["codex"][-2]["confirmed_reset"])
+        self.assertNotIn("confirmed_reset", anchors["codex"][-1])
+        self.assertEqual(len(cycles), 2)
+        self.assertEqual(cycles[0][0], first_zero_reset - WEEK)
+
+    def test_confirmed_peer_reset_is_kept_without_local_history(self):
+        reset = 6 * WEEK
+        anchors = {}
+        USAGE._merge_quota_anchors(anchors, {"codex": [{
+            "reset": reset,
+            "last_seen": reset - WEEK,
+            "max_used": 0.0,
+            "confirmed_reset": True,
+        }]})
+
+        cycles = USAGE._quota_anchor_cycles(
+            anchors, "codex", WEEK, 8, reset - WEEK
+        )
+
+        self.assertTrue(anchors["codex"][0]["confirmed_reset"])
+        self.assertEqual(len(cycles), 1)
+        self.assertTrue(cycles[0][3])
 
 
 class CycleSpecsTests(unittest.TestCase):
@@ -137,7 +183,7 @@ class CycleSpecsTests(unittest.TestCase):
     def test_tool_with_neither_reading_nor_history_is_reported_missing(self):
         charted, missing, _anchors, _saved = self._run({}, [], 6 * WEEK)
         self.assertEqual(charted, [])
-        self.assertEqual(missing, ["claude", "codex", "grok", "kimi"])
+        self.assertEqual(missing, ["claude", "codex", "grok"])
 
 
 class DeviceLedgerAnchorTests(unittest.TestCase):

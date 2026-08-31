@@ -1,5 +1,9 @@
+import builtins
+import atexit
 import importlib.util
 import json
+import os
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -8,20 +12,29 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "usage.30s.py"
+
+# usage.30s.py 在导入时就把 HOME 展开成 ~/.codex、~/.tokei/ledger.json 等路径常量,
+# 必须在 exec_module 之前换成沙箱,否则真实账本会把毕生用量并进 scan 结果。
+_SANDBOX_HOME = tempfile.mkdtemp(prefix="tokei-test-home-")
+os.environ["HOME"] = _SANDBOX_HOME
+os.environ["USERPROFILE"] = _SANDBOX_HOME
+atexit.register(shutil.rmtree, _SANDBOX_HOME, True)
+
 SPEC = importlib.util.spec_from_file_location("tokei_usage", SCRIPT)
 USAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(USAGE)
 
-# 测试不得读写本机 ~/.tokei/ledger.json
-_LEDGER_DIR = tempfile.TemporaryDirectory(prefix="tokei-ledger-")
-USAGE._LEDGER_FILE = str(Path(_LEDGER_DIR.name) / "ledger.json")
-Path(USAGE._LEDGER_FILE).write_text('{"v":1,"tools":{}}', encoding="utf-8")
-_REAL_LEDGER_RECONCILE = USAGE.ledger_reconcile
-_REAL_LEDGER_TOUCH = USAGE.ledger_touch
-# 默认测试走实时日志,避免共享账本把“今天”的高水位串到其他用例
-USAGE.ledger_reconcile = lambda tool, live_days: live_days
-USAGE.ledger_touch = lambda tool: None
-USAGE._LEDGER_CACHE = {"data": None, "dirty": False}
+# ledger_reconcile 会兜底回填"仅账本有"的天,进程内缓存不清会让前一个用例的天数漏进后一个。
+_TESTCASE_RUN = unittest.TestCase.run
+
+
+def _run_with_clean_ledger(self, *args, **kwargs):
+    USAGE._LEDGER_CACHE["data"] = None
+    USAGE._LEDGER_CACHE["dirty"] = False
+    return _TESTCASE_RUN(self, *args, **kwargs)
+
+
+unittest.TestCase.run = _run_with_clean_ledger
 
 
 class _Response:
@@ -43,6 +56,14 @@ class _Response:
 
 
 class CodexQuotaValuesTests(unittest.TestCase):
+    def setUp(self):
+        self.patchers = [
+            mock.patch.object(USAGE, "_codex_is_custom_provider", return_value=False),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_legacy_primary_5h_secondary_week(self):
         limits = {
             "primary": {"used_percent": 25.0, "window_minutes": 300, "resets_at": 200},
@@ -373,6 +394,7 @@ class CodexScanFreshnessTests(unittest.TestCase):
             result = self.scan(tmp)
 
         self.assertEqual(result["limits_updated"], _epoch(2024, 1, 8, 0, 30))
+        # 重置点在 02:00,只有 05:00 那笔(50 输入 + 5 输出)算在窗口翻篇之后
         self.assertEqual(result["limits_consumed"], {"p5": None, "pw": 55})
 
     def test_expired_reading_with_usage_is_reported_stale(self):
@@ -386,6 +408,125 @@ class CodexScanFreshnessTests(unittest.TestCase):
         self.assertTrue(values["pw_stale"])
         self.assertEqual(values["pw"], 90.0)
         self.assertEqual(values["rw"], self.RESET)
+
+
+class CodexCustomProviderTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.config_path = Path(self.tmp.name) / "config.toml"
+        self.quota_cache_path = Path(self.tmp.name) / "quota_cache.json"
+        self.reset_cards_cache_path = Path(self.tmp.name) / "reset_cards_cache.json"
+        self.auth_path = Path(self.tmp.name) / "auth.json"
+        self.auth_path.write_text(json.dumps({
+            "tokens": {"access_token": "test-token", "account_id": "test-account"}
+        }))
+        self.patchers = [
+            mock.patch.object(USAGE, "CODEX_CONFIG", str(self.config_path)),
+            mock.patch.object(USAGE, "CODEX_QUOTA_CACHE", str(self.quota_cache_path)),
+            mock.patch.object(USAGE, "CODEX_RESET_CARDS_CACHE", str(self.reset_cards_cache_path)),
+            mock.patch.object(USAGE, "CODEX_AUTH", str(self.auth_path)),
+        ]
+        for patcher in self.patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _write_config(self, text):
+        self.config_path.write_text(text)
+
+    def test_is_custom_provider_with_explicit_custom(self):
+        self._write_config('model_provider = "custom"\nmodel = "deepseek-v4-flash"\n')
+        self.assertTrue(USAGE._codex_is_custom_provider())
+
+    def test_is_not_custom_provider_with_openai(self):
+        self._write_config('model_provider = "openai"\nmodel = "gpt-5.5"\n')
+        self.assertFalse(USAGE._codex_is_custom_provider())
+
+    def test_is_not_custom_provider_without_config(self):
+        self.assertFalse(USAGE._codex_is_custom_provider())
+
+    def test_declared_but_unused_provider_block_stays_official(self):
+        # 只准备了 provider 段、没把 model_provider 指过去的人还在用官方额度，
+        # 误判成第三方会把他们的额度卡整块藏掉。
+        self._write_config('[model_providers.packycode]\nbase_url = "https://x"\n')
+        self.assertFalse(USAGE._codex_is_custom_provider())
+
+    def test_custom_provider_detected_without_tomllib(self):
+        # macOS 自带的 /usr/bin/python3 是 3.9，没有 tomllib；模块级 import 会让
+        # 整个脚本崩掉，所以走惰性导入 + 回退解析，这里锁住回退路径。
+        self._write_config('model_provider = "packycode"\n'
+                           '[model_providers.packycode]\nbase_url = "https://x"\n')
+        real_import = builtins.__import__
+
+        def no_tomllib(name, *args, **kwargs):
+            if name == "tomllib":
+                raise ImportError("no tomllib on 3.9")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch.object(builtins, "__import__", side_effect=no_tomllib):
+            self.assertEqual(USAGE._codex_config()["model_provider"], "packycode")
+            self.assertTrue(USAGE._codex_is_custom_provider())
+
+    def test_live_quota_skipped_for_custom_provider(self):
+        self._write_config('model_provider = "custom"\n')
+        # Pre-populate a stale official cache to prove it gets cleared.
+        self.quota_cache_path.write_text(json.dumps({
+            "fetched_at": 1_785_000_000,
+            "limits": {"primary": {"used_percent": 80.0}},
+            "plan": "pro",
+        }))
+        opener = mock.Mock(side_effect=AssertionError("should not call API"))
+        with mock.patch("urllib.request.urlopen", opener):
+            self.assertIsNone(USAGE.fetch_codex_live_limits())
+        self.assertFalse(self.quota_cache_path.exists())
+
+    def test_reset_cards_survive_for_custom_provider(self):
+        # 重置卡挂在 OpenAI 账号上，临时切到第三方中转不会让卡消失；
+        # 按 provider 屏蔽会既藏掉卡、又删掉本地缓存。
+        self._write_config('model_provider = "custom"\n')
+        now = 1_785_000_000
+        auth_context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
+        self.reset_cards_cache_path.write_text(json.dumps({
+            "account_key": auth_context["account_key"],
+            "auth_key": auth_context["auth_key"],
+            "next_attempt_at": now + 3600,
+            "cards": {"count": 1, "expires": [now + 86400], "updated": now - 60},
+        }))
+        opener = mock.Mock(side_effect=AssertionError("should not call API"))
+        with mock.patch("urllib.request.urlopen", opener):
+            cards = USAGE.fetch_codex_reset_cards(now_epoch=now)
+        self.assertEqual(cards["count"], 1)
+        self.assertEqual(cards["expires"], [now + 86400])
+        self.assertTrue(self.reset_cards_cache_path.exists())
+
+    def test_iter_records_parses_token_count_with_ordinal_field(self):
+        """Custom-provider Codex logs insert an 'ordinal' field between timestamp and type."""
+        session_path = Path(self.tmp.name) / "rollout-ordinal.jsonl"
+        session_path.write_text(json.dumps({
+            "timestamp": "2026-08-07T08:00:01.000Z",
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {"model": "deepseek-v4-flash"}
+        }) + "\n" + json.dumps({
+            "timestamp": "2026-08-07T08:00:04.000Z",
+            "ordinal": 18,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 1000,
+                        "cached_input_tokens": 800,
+                        "output_tokens": 200,
+                        "reasoning_output_tokens": 50,
+                    }
+                }
+            }
+        }) + "\n")
+        records = list(USAGE._iter_codex_usage_records(str(session_path)))
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], ("model", "deepseek-v4-flash"))
+        self.assertEqual(records[1][0], "token")
 
 
 if __name__ == "__main__":

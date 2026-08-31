@@ -5,16 +5,24 @@
 # <bitbar.desc>本地 AI coding tools token / 缓存命中 / 花费 / 额度</bitbar.desc>
 # <swiftbar.runInBash>false</swiftbar.runInBash>
 #
-# 数据主要读自本地会话日志；Codex/Kimi 额度会短缓存查询官方接口，Kimi 可按官方协议续期 OAuth。
+# 数据主要读自本地会话日志,不改动任何 CLI；Codex 额度会短缓存查询官方 live usage；
+# Kimi 额度复用本地登录态查询官方接口，并按官方协议自动续期 OAuth
+# (config kimi_live_quota_enabled 默认开，TOKEI_KIMI_LIVE_QUOTA=0/1 可覆盖)。
 # Grok 额度默认只读本地 unified.jsonl billing 日志；实时账单接口需显式开启
 # (config grok_live_quota_enabled 或 TOKEI_GROK_LIVE_QUOTA=1)。
-# 仅 --update-prices 显式联网更新价格表:
+# 千问办公额度同样默认关闭；开启后仅访问官方桌面端的 127.0.0.1 MCP 适配器，
+# 不读取或解密账号凭据 (config qwenwork_quota_enabled 或 TOKEI_QWENWORK_QUOTA=1)。
+# Cursor / Zed / Sub2API / z.ai 额度默认关闭；开启卡片后才复用本机登录态或 Keychain
+# API Key 查询对应官方/自托管接口。Antigravity 额度只探测已运行的 127.0.0.1 服务。
+# --update-prices 仍只在用户显式触发时更新价格表。
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
 #   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
+#   DeepSeek:    ~/.dsh/sessions/**/*.jsonl.zstd (由 App 原生解压后增量扫描)
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
-#   Kimi Code:   ~/.kimi-code/sessions/**/agents/*/wire.jsonl (usage.record)
+#   Kimi Code:   ${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl
+#                兼容旧版 ${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl
 
 import os
 import sys
@@ -25,11 +33,13 @@ import math
 import platform
 import re
 import socket
+import sqlite3
+import subprocess
 import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
 
 HOME = os.path.expanduser("~")
@@ -85,16 +95,24 @@ CLAUDE_DIR = os.path.join(HOME, ".claude", "projects")
 CODEX_DIR = os.path.join(HOME, ".codex", "sessions")
 CODEX_ARCHIVED_DIR = os.path.join(HOME, ".codex", "archived_sessions")
 CODEX_AUTH = os.path.join(HOME, ".codex", "auth.json")
+CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
 GEMINI_DIR = os.path.join(HOME, ".gemini", "tmp")
+ANTIGRAVITY_DIR = os.path.join(HOME, ".gemini", "antigravity-cli", "conversations")
 GEMINI_DIRS = _path_candidates(
     "TOKEI_GEMINI_DIR", GEMINI_DIR,
-    os.path.join(HOME, ".gemini", "gemini-cli", "conversations"))
+    ANTIGRAVITY_DIR,
+    os.path.join(HOME, ".gemini", "antigravity", "conversations"),
+    os.path.join(HOME, ".gemini", "antigravity-ide", "conversations"),
+    os.path.join(HOME, ".gemini", "gemini-cli", "conversations"),
+    *([os.environ["TOKEI_ANTIGRAVITY_DIR"]] if "TOKEI_ANTIGRAVITY_DIR" in os.environ else []))
 GROK_HOME = os.path.abspath(os.path.expanduser(
     os.environ.get("GROK_HOME", os.path.join(HOME, ".grok"))))
 GROK_DIR = os.path.join(GROK_HOME, "sessions")
 GROK_LOG = os.path.join(GROK_HOME, "logs", "unified.jsonl")
 GROK_AUTH = os.path.join(GROK_HOME, "auth.json")
 WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy", "projects")
+DEEPSEEK_HARNESS_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
+    "TOKEI_DSH_DECOMPRESSED_DIR", os.path.join(HOME, ".tokei", "cache", "dsh-sessions"))))
 QODER_IDE_DB = os.path.join(HOME, "Library", "Application Support", "Qoder",
                             "SharedClientCache", "cache", "db", "local.db")
 QODER_IDE_DB_PATHS = _path_candidates(
@@ -125,16 +143,27 @@ OPENCLAW_STATE_DB = os.path.join(HOME, ".openclaw", "state", "openclaw.sqlite")
 OPENCLAW_AGENTS = os.path.join(HOME, ".openclaw", "agents")
 PI_AGENT_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_DIR", os.path.join(HOME, ".pi", "agent")))
 PI_SESSION_DIR = os.path.expanduser(os.environ.get("PI_CODING_AGENT_SESSION_DIR", os.path.join(PI_AGENT_DIR, "sessions")))
+PRIME_AGENT_DIR = os.path.expanduser(os.environ.get(
+    "PRIME_AGENT_CODING_AGENT_DIR", os.path.join(HOME, ".prime", "agent")))
+PRIME_AGENT_SESSION_DIR = os.path.expanduser(os.environ.get(
+    "PRIME_AGENT_SESSION_DIR", os.environ.get(
+        "PRIME_AGENT_CODING_AGENT_SESSION_DIR", os.path.join(PRIME_AGENT_DIR, "sessions"))))
 OMP_SESSION_DIR = os.path.expanduser(os.environ.get(
     "OMP_CODING_AGENT_SESSION_DIR", os.path.join(HOME, ".omp", "agent", "sessions")))
 QWEN_CODE_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("QWEN_HOME", os.path.join(HOME, ".qwen"))))
-KIMI_CODE_HOME = os.path.abspath(os.path.expanduser(
-    os.environ.get("KIMI_CODE_HOME", os.path.join(HOME, ".kimi-code"))))
-KIMI_SESSION_INDEX = os.path.join(KIMI_CODE_HOME, "session_index.jsonl")
-KIMI_CREDENTIALS = os.path.join(KIMI_CODE_HOME, "credentials", "kimi-code.json")
-KIMI_DEVICE_ID = os.path.join(KIMI_CODE_HOME, "device_id")
-KIMI_OAUTH_LOCK_TARGET = os.path.join(KIMI_CODE_HOME, "oauth", "kimi-code")
+QWENWORK_HOME = os.path.abspath(os.path.expanduser(
+    os.environ.get("TOKEI_QWENWORK_HOME", os.path.join(HOME, ".qwenworkcn"))))
+QWENWORK_MCP_CONFIG = os.path.join(QWENWORK_HOME, "mcp-adaptor.config")
+QWENWORK_STATUS = os.path.join(QWENWORK_HOME, ".status.json")
+_KIMI_CODE_DEFAULT_DIR = os.path.join(HOME, ".kimi-code")
+_KIMI_CODE_LEGACY_DIR = os.path.join(HOME, ".kimi")
+KIMI_CODE_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("TOKEI_KIMI_DIR") or os.environ.get("KIMI_CODE_HOME")
+    or os.environ.get("KIMI_SHARE_DIR") or _KIMI_CODE_DEFAULT_DIR))
+KIMI_CREDENTIALS = os.path.join(KIMI_CODE_DIR, "credentials", "kimi-code.json")
+KIMI_DEVICE_ID = os.path.join(KIMI_CODE_DIR, "device_id")
+KIMI_OAUTH_LOCK_TARGET = os.path.join(KIMI_CODE_DIR, "oauth", "kimi-code")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _USER_DIR = os.path.join(HOME, ".tokei")
@@ -160,6 +189,9 @@ CODEX_RESET_CARDS_CACHE = _writable_path("codex_reset_cards_cache.json")
 CLAUDE_QUOTA_CACHE = _writable_path("claude_quota_cache.json")
 GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
 KIMI_QUOTA_CACHE = _writable_path("kimi_quota_cache.json")
+QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
+PROVIDER_QUOTA_CACHE = _writable_path("provider_quota_cache.json")
+ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -180,6 +212,24 @@ _DEFAULT_PRICES = {
     "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
     "tencent/hy3-preview":           {"in": 0.063, "out": 0.21, "cache_read": 0.021,  "cache_write": 0.0},
 }
+
+# DeepSeek Harness 的 deepseek-official 路由按官方直连价计算，不能套用
+# OpenRouter 同名模型的渠道价。单位均为 USD / 1M tokens。
+_DEEPSEEK_OFFICIAL_PRICES = {
+    "deepseek-v4-pro": {
+        "in": 0.435, "out": 0.87, "cache_read": 0.003625, "cache_write": 0.0,
+    },
+    "deepseek-v4-flash": {
+        "in": 0.14, "out": 0.28, "cache_read": 0.0028, "cache_write": 0.0,
+    },
+}
+
+
+def _deepseek_official_price(model):
+    normalized = _normalize(model) or ""
+    model_id = normalized.rsplit("/", 1)[-1]
+    price = _DEEPSEEK_OFFICIAL_PRICES.get(model_id)
+    return dict(price) if price else None
 
 
 def _load_json(path, default):
@@ -278,6 +328,32 @@ def _known_id_or_raw(model: str):
         if keyword in low:
             return representative
     return s
+
+
+def _model_identity_id(model: str):
+    """Resolve only exact catalog identities; never guess an unknown model family."""
+    s = (model or "").strip()
+    if not s or s.lower() == "<synthetic>":
+        return None
+    if s in _OV_ALIASES:
+        return _OV_ALIASES[s]
+    norm = _normalize(s)
+    if norm and (norm in _OV_MODELS or norm in _PRICING_DB or norm in _DEFAULT_PRICES):
+        return norm
+    for model_id, entry in _PRICING_DB.items():
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("canonical_slug")
+        if isinstance(slug, str) and _normalize(slug) == norm:
+            return model_id
+    return s
+
+
+def _exact_pricing_id(model: str):
+    """Return a catalog pricing ID without family-based fallback."""
+    if model and (model in _OV_MODELS or model in _PRICING_DB or model in _DEFAULT_PRICES):
+        return model
+    return None
 
 
 def _has_known_price(model: str):
@@ -438,29 +514,23 @@ def human(n: float) -> str:
 
 # ---------- 增量扫描缓存 ----------
 import tempfile as _tempfile
+import time as _time
 _LEGACY_SCAN_CACHE_FILE = os.path.join(
     _tempfile.gettempdir(), "_tokei_scan_cache.json")
-_SCAN_CACHE_DIR = _expand_path(os.environ.get("TOKEI_CACHE_DIR")) or os.path.join(
+_SCAN_CACHE_DIR = os.environ.get("TOKEI_CACHE_DIR") or os.path.join(
     HOME, ".tokei", "cache")
-_DEFAULT_SCAN_CACHE_FILE = os.path.join(_SCAN_CACHE_DIR, "scan_cache.json")
+_DEFAULT_SCAN_CACHE_FILE = os.path.join(
+    _SCAN_CACHE_DIR, "scan_cache.json")
 _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
-_SCAN_CACHE_VERSION = 20
+_SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
 _CODEX_PARSER_VERSION = 3
 _CODEX_SCAN_CHECKPOINT_INTERVAL = 5.0
 _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
-
-
-def _ensure_private_directory(directory):
-    if not directory:
-        return
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    try:
-        os.chmod(directory, 0o700)
-    except OSError:
-        pass
+_CURSOR_PROVIDER_DAYS_CACHE_KEY = "_cursor_provider_days"
+_ZAI_PROVIDER_DAYS_CACHE_KEY = "_zai_provider_days"
 
 
 def _remove_codex_event_cache_dir():
@@ -469,7 +539,6 @@ def _remove_codex_event_cache_dir():
 
 
 def _migrate_legacy_scan_cache():
-    """Copy the temp cache and its sidecars into the persistent private cache."""
     if (_SCAN_CACHE_FILE != _DEFAULT_SCAN_CACHE_FILE
             or os.path.exists(_SCAN_CACHE_FILE)
             or not os.path.isfile(_LEGACY_SCAN_CACHE_FILE)):
@@ -477,26 +546,26 @@ def _migrate_legacy_scan_cache():
 
     import shutil
     directory = os.path.dirname(_SCAN_CACHE_FILE)
-    _ensure_private_directory(directory)
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
     fd, tmp = _tempfile.mkstemp(prefix=".scan-cache-", suffix=".json", dir=directory)
     try:
         os.close(fd)
         shutil.copyfile(_LEGACY_SCAN_CACHE_FILE, tmp)
         os.chmod(tmp, 0o600)
-
         legacy_events = f"{_LEGACY_SCAN_CACHE_FILE}{_CODEX_EVENT_CACHE_SUFFIX}"
-        current_events = f"{_SCAN_CACHE_FILE}{_CODEX_EVENT_CACHE_SUFFIX}"
+        current_events = _codex_event_cache_dir()
         if os.path.isdir(legacy_events) and not os.path.exists(current_events):
             shutil.copytree(legacy_events, current_events)
-            for root, dirs, files in os.walk(current_events):
-                os.chmod(root, 0o700)
-                for name in dirs:
-                    os.chmod(os.path.join(root, name), 0o700)
-                for name in files:
-                    os.chmod(os.path.join(root, name), 0o600)
-
+            try:
+                os.chmod(current_events, 0o700)
+            except OSError:
+                pass
         os.replace(tmp, _SCAN_CACHE_FILE)
-        os.chmod(_SCAN_CACHE_FILE, 0o600)
     except Exception:
         try:
             os.unlink(tmp)
@@ -505,10 +574,8 @@ def _migrate_legacy_scan_cache():
 
 
 def _load_scan_cache():
-    _ensure_private_directory(os.path.dirname(_SCAN_CACHE_FILE))
     _migrate_legacy_scan_cache()
     try:
-        os.chmod(_SCAN_CACHE_FILE, 0o600)
         with open(_SCAN_CACHE_FILE, "r") as f:
             c = json.load(f)
         version = c.get("v")
@@ -537,7 +604,12 @@ def _save_scan_cache(cache):
     tmp = None
     try:
         directory = os.path.dirname(_SCAN_CACHE_FILE)
-        _ensure_private_directory(directory)
+        if directory:
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            try:
+                os.chmod(directory, 0o700)
+            except OSError:
+                pass
         fd, tmp = _tempfile.mkstemp(prefix="_tokei_scan_cache.", suffix=".json",
                                     dir=directory or None)
         payload = json.dumps(cache, separators=(',', ':')).encode("utf-8")
@@ -558,7 +630,7 @@ def _save_scan_cache(cache):
 # 目的:CLI(如 Claude Code 默认 30 天清理)删除旧日志后,历史用量不再缩水。
 # 语义:现存日志实时计算为准;某天实时值低于账本(=日志被清)时,用账本兜底。
 # 独立于 scan cache 的版本机制,永不因解析器/缓存升级而失效。
-_LEDGER_FILE = os.path.join(_USER_DIR, "ledger.json")
+_LEDGER_FILE = os.path.join(HOME, ".tokei", "ledger.json")
 _LEDGER_VERSION = 1
 _LEDGER_FIELDS = ("in", "out", "cr", "cw", "reason", "cached", "cost")
 
@@ -607,7 +679,7 @@ def ledger_flush():
     lock_fd = None
     try:
         import fcntl
-        _ensure_private_directory(os.path.dirname(_LEDGER_FILE))
+        os.makedirs(os.path.dirname(_LEDGER_FILE), mode=0o700, exist_ok=True)
         lock_fd = os.open(f"{_LEDGER_FILE}.lock", os.O_CREAT | os.O_RDWR, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
     except OSError:
@@ -641,7 +713,7 @@ def _save_ledger(ledger):
     tmp = None
     try:
         directory = os.path.dirname(_LEDGER_FILE)
-        _ensure_private_directory(directory)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
         fd, tmp = _tempfile.mkstemp(prefix=".ledger-", suffix=".json", dir=directory)
         with os.fdopen(fd, "w") as f:
             json.dump(ledger, f, separators=(',', ':'))
@@ -744,13 +816,9 @@ def _with_scan_cache_lock(fn):
         lock_path = f"{_SCAN_CACHE_FILE}.lock"
         lock_dir = os.path.dirname(lock_path)
         if lock_dir:
-            _ensure_private_directory(lock_dir)
+            os.makedirs(lock_dir, exist_ok=True)
         lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
         try:
-            try:
-                os.fchmod(lock_fd, 0o600)
-            except OSError:
-                pass
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             return fn(*args, **kwargs)
         finally:
@@ -786,7 +854,8 @@ def _empty_claude():
 def _empty_codex():
     ranges = {k: {"in": 0, "cached": 0, "out": 0, "reason": 0,
                   "cost": 0.0, "sessions": set(), "models": {}} for k in RANGE_KEYS}
-    return {"ranges": ranges, "limits": None, "plan": None}
+    return {"ranges": ranges, "limits": None, "plan": None,
+            "limits_updated": None, "limits_consumed": None}
 
 
 def _empty_gemini():
@@ -846,7 +915,15 @@ def _empty_pi():
     return _empty_opencode()
 
 
+def _empty_prime_agent():
+    return _empty_opencode()
+
+
 def _empty_workbuddy():
+    return _empty_opencode()
+
+
+def _empty_deepseek_harness():
     return _empty_opencode()
 
 
@@ -854,7 +931,7 @@ def _empty_qwencode():
     return _empty_opencode()
 
 
-def _empty_kimi():
+def _empty_kimicode():
     return _empty_opencode()
 
 
@@ -943,10 +1020,12 @@ def _format_token_models(models, include_prices=True):
     sort_key = (lambda kv: -kv[1].get("cost", 0)) if include_prices else (
         lambda kv: -token_total(kv[1]))
     for n, v in sorted(models.items(), key=sort_key):
-        price_id = _pricing_id(n) if include_prices else None
+        model_id = _model_identity_id(n)
+        price_id = _exact_pricing_id(model_id) if include_prices else None
         p = _raw_price(price_id) if price_id else {
             "in": 0.0, "out": 0.0, "cache_read": 0.0, "cache_write": 0.0}
-        result.append({"name": nice_model(n), "in": v.get("in", 0), "out": v.get("out", 0),
+        result.append({"model_id": model_id, "name": nice_model(model_id),
+                       "in": v.get("in", 0), "out": v.get("out", 0),
                         "cr": v.get("cr", 0), "cw": v.get("cw", 0), "reason": v.get("reason", 0),
                         "cost": v.get("cost", 0), "pin": p["in"], "pout": p["out"]})
     return result
@@ -1146,26 +1225,27 @@ def scan_claude(bounds, cache):
     live_days = {}
     day_projects = {}
     for f, entry in fc.items():
+        proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
         for dk, day in entry.get("days", {}).items():
             agg = live_days.setdefault(
                 dk, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}})
             agg["in"] += day["in"]; agg["out"] += day["out"]
             agg["cr"] += day["cr"]; agg["cw"] += day["cw"]; agg["cost"] += day["cost"]
+            if proj_name:
+                day_projects.setdefault(dk, set()).add(proj_name)
             for mn, mv in day["models"].items():
                 mm = agg["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
                 mm["in"] += mv["in"]; mm["out"] += mv["out"]
                 mm["cr"] += mv["cr"]; mm["cw"] += mv["cw"]; mm["cost"] += mv["cost"]
-            proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
-            if proj_name and proj_name != "?":
-                day_projects.setdefault(dk, set()).add(proj_name)
+            # 会话数只能来自现存日志(被清日志无从归属)
             try:
                 d = date.fromisoformat(dk)
             except ValueError:
                 continue
             for k in classify(d):
                 B[k]["sessions"].add(f)
-
-    # 项目名随天入账本,日志被清理后回顾页仍能回答"那天在干什么"。
+    # 项目名随天入账本(list 会被 snapshot 原样存档;_ledger_day_total 只加数值,不受影响),
+    # 日志被清理后回顾页仍能回答"那天在干什么"。
     for dk, names in day_projects.items():
         live_days[dk]["projects"] = sorted(names)[:3]
 
@@ -1242,7 +1322,9 @@ def _claude_usage(line, want_dt=False):
 
 
 # ---------- Codex ----------
-_CODEX_QUOTA_TTL = 30
+# TTL 曾等于 App 的 30s 刷新间隔,缓存每轮刚好过期 —— 等于每次刷新都真打一次官方
+# 接口(约 2880 次/天)。额度对应的是周窗口,变化很慢,拉长到 5 分钟没有感知差别。
+_CODEX_QUOTA_TTL = 300
 _CODEX_QUOTA_FALLBACK_TTL = 300
 _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
@@ -1361,6 +1443,49 @@ def _decode_jwt_claims(token):
         return {}
 
 
+def _codex_config():
+    """→ {"model_provider": str|None, "model_providers": [名字]};读不到返回空。
+
+    tomllib 是 3.11+ 才有的,而没装 Homebrew Python 的机器会落到 /usr/bin/python3
+    (macOS 自带 3.9),模块级 import 会让整个脚本崩掉 —— 所以惰性导入 + 最小回退。
+    """
+    try:
+        with open(CODEX_CONFIG, "rb") as f:
+            raw = f.read(64 * 1024)
+    except OSError:
+        return {}
+    try:
+        import tomllib
+    except ImportError:
+        # 3.9 回退:只认顶层 model_provider = "x" 和 [model_providers.x] 段名。
+        text = raw.decode("utf-8", errors="ignore")
+        hit = re.search(r'^\s*model_provider\s*=\s*["\']([^"\']+)["\']', text, re.M)
+        return {
+            "model_provider": hit.group(1) if hit else None,
+            "model_providers": re.findall(
+                r'^\s*\[\s*model_providers\.([^\]\s.]+)', text, re.M),
+        }
+    try:
+        data = tomllib.loads(raw.decode("utf-8", errors="ignore")) or {}
+    except Exception:
+        return {}
+    provider = data.get("model_provider")
+    return {
+        "model_provider": provider if isinstance(provider, str) else None,
+        "model_providers": list((data.get("model_providers") or {}).keys()),
+    }
+
+
+def _codex_is_custom_provider():
+    """True 表示 Codex 已切到非 OpenAI 的 provider(cc Switch 之类)。
+
+    只认显式声明:光有 [model_providers.x] 段、但没把 model_provider 指过去的用户
+    仍在用官方额度,误判会把他们的额度卡整块藏掉。
+    """
+    provider = _codex_config().get("model_provider")
+    return bool(provider) and provider != "openai"
+
+
 def _codex_auth_context(auth):
     if not isinstance(auth, dict):
         return {}
@@ -1400,6 +1525,20 @@ def _codex_auth_context(auth):
 def fetch_codex_live_limits():
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
         return None
+    # When the user has switched to a third-party provider (cc Switch, etc.),
+    # the official OpenAI quota endpoint is no longer relevant. Skip it and
+    # clear any stale cached official quota so the dashboard falls back to
+    # showing only token usage/cost.
+    if _codex_is_custom_provider():
+        try:
+            if os.path.exists(CODEX_QUOTA_CACHE):
+                os.remove(CODEX_QUOTA_CACHE)
+        except Exception:
+            pass
+        return None
+    cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL)
+    if cached:
+        return cached
     auth = _load_json(CODEX_AUTH, {})
     auth_context = _codex_auth_context(auth)
     access_token = auth_context.get("access_token")
@@ -1545,6 +1684,8 @@ def fetch_codex_reset_cards(now_epoch=None):
     """Return available reset-card expirations with a persistent low-frequency cache."""
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
         return {}
+    # 重置卡是 OpenAI 账号级资产,不随 CLI 当前指向的 provider 变化 —— 临时切到
+    # 第三方中转的人手上那几张卡还在,切回来就要用,所以这里不按 provider 屏蔽。
     now_epoch = int(datetime.now().timestamp()) if now_epoch is None else int(now_epoch)
     auth = _load_json(CODEX_AUTH, {})
     auth_context = _codex_auth_context(auth)
@@ -2324,7 +2465,8 @@ def scan_codex(bounds, cache):
         if fc:
             _codex_clear_event_cache(fc)
             cache["_dirty"] = True
-        return {"ranges": B, "cur_total": None, "limits": None, "plan": None}
+        return {"ranges": B, "cur_total": None, "limits": None, "plan": None,
+                "limits_updated": None, "limits_consumed": None}
 
     today_d = bounds["today"].date()
     yest_d = bounds["yesterday"].date()
@@ -2338,7 +2480,7 @@ def scan_codex(bounds, cache):
     stale = set(fc.keys())
     dedupe_paths = set()
     active_root = os.path.realpath(CODEX_DIR) if os.path.isdir(CODEX_DIR) else None
-    next_checkpoint = time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
+    next_checkpoint = _time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
 
     for f in rollout_files:
         stale.discard(f)
@@ -2356,18 +2498,33 @@ def scan_codex(bounds, cache):
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
         entry = fc.get(f)
+        event_cache_ready = _codex_event_cache_ready(f, entry)
+        legacy_parser_cache = (
+            isinstance(entry, dict)
+            and entry.get("parser_version") is None
+            and entry.get("model_version") == 2
+            and event_cache_ready
+        )
+        legacy_cache_usable = legacy_parser_cache and (
+            int(entry.get("event_count", 0) or 0) > 0 or size == 0)
+        if legacy_cache_usable and entry.get("sig") == sig:
+            entry["parser_version"] = _CODEX_PARSER_VERSION
+            entry.pop("model_version", None)
+            cache["_dirty"] = True
+            continue
         if (not entry or entry.get("sig") != sig
                 or entry.get("parser_version") != _CODEX_PARSER_VERSION
-                or not _codex_event_cache_ready(f, entry)):
+                or not event_cache_ready):
             complete_offset = _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
             if (isinstance(entry, dict)
-                    and entry.get("parser_version") == _CODEX_PARSER_VERSION):
+                    and (entry.get("parser_version") == _CODEX_PARSER_VERSION
+                         or legacy_cache_usable)):
                 old_offset = int(entry.get("parsed_size", 0) or 0)
                 if (entry.get("file_id") == file_id and old_offset <= complete_offset
                         and entry.get("parsed_guard") == _codex_offset_guard(f, old_offset)
-                        and _codex_event_cache_ready(f, entry)):
+                        and event_cache_ready):
                     append_from = old_offset
 
             if append_from is None:
@@ -2509,9 +2666,9 @@ def scan_codex(bounds, cache):
                 "canonical": was_canonical,
             }
             cache["_dirty"] = True
-            if time.monotonic() >= next_checkpoint:
+            if _time.monotonic() >= next_checkpoint:
                 _save_scan_cache(cache)
-                next_checkpoint = time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
+                next_checkpoint = _time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
 
     for p in stale:
         fc.pop(p, None)
@@ -2582,6 +2739,7 @@ def scan_codex(bounds, cache):
                                  usage.get("reason", 0), usage.get("cost", 0))
             for hour, amount in enumerate((day.get("hours") or [])[:24]):
                 agg["hours"][hour] += amount
+            # 会话数只能来自现存日志(被清日志无从归属)
             for k in _codex_range_keys(d):
                 B[k]["sessions"].add(f)
 
@@ -2622,6 +2780,7 @@ def scan_codex(bounds, cache):
         selected_limits_ts = g_ts
 
     # 读数时间:live 真正胜出时用抓取时刻,否则用日志里那条记录的时间。
+    # live_updated 只在 if live 分支内有定义,先在外面兜底。
     limits_updated = _iso_to_epoch(selected_limits_ts)
     live = fetch_codex_live_limits()
     if live:
@@ -2638,6 +2797,12 @@ def scan_codex(bounds, cache):
         "p5": _codex_used_since(merged_days, slots["r5"]),
         "pw": _codex_used_since(merged_days, slots["rw"]),
     }
+
+    # For third-party providers the official OpenAI quota is not meaningful,
+    # and stale limits from older sessions must not be shown.
+    if _codex_is_custom_provider():
+        latest_limits = None
+        plan_type = None
 
     cur_total = None
     if cur_file:
@@ -2717,16 +2882,20 @@ def _codex_quota_values(limits, now_epoch=None, consumed=None):
     return values
 
 
-# ---------- Gemini CLI ----------
-# 日志:~/.gemini/tmp/<projectHash>/chats/{session-*.json,session-*.jsonl,<parent>/*.jsonl}
-# assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
-# (total=input+output+thoughts,cached⊂input)。JSONL 是追加日志，同消息 ID 以后写入的记录覆盖之前记录。
+# ---------- Gemini / Antigravity CLI ----------
+# 日志:
+# - Gemini CLI: ~/.gemini/tmp/<projectHash>/chats/{session-*.json,session-*.jsonl,<parent>/*.jsonl}
+#   assistant 行 type=="gemini",tokens={input,output,cached,thoughts,total}
+# - Antigravity CLI: ~/.gemini/antigravity-cli/conversations/<uuid>.db
+#   gen_metadata 表存储 protobuf 逐步生成指标(包含 input, output, cached, thoughts, model, start_time)
 def _gemini_session_files():
     files = []
     roots = _path_candidates("TOKEI_GEMINI_DIR", GEMINI_DIR, *GEMINI_DIRS)
     patterns = []
     for root in roots:
         patterns.extend((
+            os.path.join(root, "*.db"),
+            os.path.join(root, "**", "*.db"),
             os.path.join(root, "*", "chats", "session-*.json"),
             os.path.join(root, "*", "chats", "**", "*.jsonl"),
             os.path.join(root, "**", "session-*.json"),
@@ -2734,7 +2903,205 @@ def _gemini_session_files():
         ))
     for pattern in patterns:
         files.extend(glob.glob(pattern, recursive=True))
-    return sorted(set(os.path.realpath(path) for path in files if os.path.isfile(path)))
+    return sorted(set(os.path.realpath(path) for path in files
+                      if os.path.isfile(path) and not path.endswith("conversation_summaries.db")))
+
+
+_PROTO_VARINT_MAX_BYTES = 10  # protobuf 规范:64 位整数最多 10 个字节
+
+
+def _decode_proto_varint(data, offset):
+    """坏数据不封顶会让 val 长成百万位大整数,每轮 |= 都是 O(n),整体退化成 O(n²)。"""
+    val = 0
+    shift = 0
+    for _ in range(_PROTO_VARINT_MAX_BYTES):
+        if offset >= len(data):
+            break
+        b = data[offset]
+        offset += 1
+        val |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return val, offset
+        shift += 7
+    raise ValueError("varint 超过 64 位,当坏数据处理")
+
+
+def _parse_proto_fields(data):
+    i = 0
+    fields = []
+    while i < len(data):
+        try:
+            key, i = _decode_proto_varint(data, i)
+            field_num = key >> 3
+            wire_type = key & 0x7
+            if wire_type == 0:
+                val, i = _decode_proto_varint(data, i)
+            elif wire_type == 2:
+                length, i = _decode_proto_varint(data, i)
+                # 越界不能靠切片静默截短:截出来的碎片会被当成合法子消息继续解析。
+                if length < 0 or i + length > len(data):
+                    break
+                val = data[i:i + length]
+                i += length
+            elif wire_type in (1, 5):
+                width = 8 if wire_type == 1 else 4
+                if i + width > len(data):
+                    break
+                val = data[i:i + width]
+                i += width
+            else:
+                break
+        except Exception:
+            break
+        fields.append((field_num, wire_type, val))
+    return fields
+
+
+# gen_metadata.data 的字段号是逆向出来的,没有官方 schema:
+# 1 = 单次生成记录,其中 19=模型名, 4={2:输入(不含缓存), 3:输出, 5:缓存读, 9:思考},
+# 9→4→1 = 生成开始时间(秒)。Google 一改编号这里就会静默解出错数,所以下面做了上界校验。
+_ANTIGRAVITY_MAX_TOKENS = 100_000_000  # 单次生成的 token 上界,超了就是解析错位
+_ANTIGRAVITY_MIN_TS = 1_577_836_800    # 2020-01-01,更早的时间戳必然是错位
+
+
+def _antigravity_gen_step(record, fallback_ts=None):
+    """解一条生成记录 → (model, input, output, cached, thoughts, ts_sec);解不出返回 None。"""
+    model = "unknown"
+    inp = out = cached = thoughts = 0
+    ts_sec = None
+    for sfn, swt, sval in _parse_proto_fields(record):
+        if sfn == 19 and swt == 2:
+            try:
+                model = sval.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        elif sfn == 4 and swt == 2:
+            for tfn, twt, tval in _parse_proto_fields(sval):
+                if twt != 0:
+                    continue
+                if tfn == 2:
+                    inp = tval
+                elif tfn == 3:
+                    out = tval
+                elif tfn == 5:
+                    cached = tval
+                elif tfn == 9:
+                    thoughts = tval
+        elif sfn == 9 and swt == 2:
+            for tfn, twt, tval in _parse_proto_fields(sval):
+                if tfn == 4 and twt == 2:
+                    for stfn, stwt, stval in _parse_proto_fields(tval):
+                        if stfn == 1 and stwt == 0:
+                            ts_sec = stval
+    # 账本是逐日高水位,虚高数字一旦写进去就永久留着且无法纠正 —— 宁可丢也不能记错。
+    if not isinstance(ts_sec, int) or not (_ANTIGRAVITY_MIN_TS <= ts_sec <= 1 << 34):
+        ts_sec = fallback_ts
+    if not isinstance(ts_sec, int) or not (_ANTIGRAVITY_MIN_TS <= ts_sec <= 1 << 34):
+        return None
+    if max(inp, out, cached, thoughts) > _ANTIGRAVITY_MAX_TOKENS:
+        return None
+    if not model or len(model) > 120 or not model.isprintable():
+        model = "unknown"
+    return model, inp, out, cached, thoughts, ts_sec
+
+
+def _decode_packed_varints(data):
+    values = []
+    offset = 0
+    while offset < len(data):
+        value, offset = _decode_proto_varint(data, offset)
+        values.append(value)
+    return values
+
+
+def _antigravity_step_timestamp(metadata):
+    """Current Antigravity stores a google.protobuf.Timestamp in steps.metadata field 1."""
+    for field_num, wire_type, value in _parse_proto_fields(metadata or b""):
+        if field_num != 1 or wire_type != 2:
+            continue
+        for sub_num, sub_wire, sub_value in _parse_proto_fields(value):
+            if sub_num == 1 and sub_wire == 0 \
+                    and _ANTIGRAVITY_MIN_TS <= sub_value <= 1 << 34:
+                return sub_value
+    return None
+
+
+def _load_antigravity_db(path):
+    """从 Antigravity conversations/*.db 的 gen_metadata 表解析逐步 token 用量"""
+    events = []
+    max_ts = ""
+    conn = None
+    try:
+        conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+        rows = conn.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").fetchall()
+        try:
+            step_rows = conn.execute("SELECT idx, metadata FROM steps").fetchall()
+        except sqlite3.Error:
+            step_rows = []
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+    step_timestamps = {
+        int(step_idx): timestamp
+        for step_idx, metadata in step_rows
+        if (timestamp := _antigravity_step_timestamp(metadata)) is not None
+    }
+
+    for idx, data in rows:
+        if not data:
+            continue
+        fields = _parse_proto_fields(data)
+        referenced_steps = []
+        for fn, wt, val in fields:
+            if fn == 2 and wt == 2:
+                try:
+                    referenced_steps.extend(_decode_packed_varints(val))
+                except ValueError:
+                    pass
+        fallback_ts = next((step_timestamps.get(step_idx) for step_idx in referenced_steps
+                            if step_timestamps.get(step_idx) is not None), None)
+        record_index = 0
+        for fn, wt, val in fields:
+            if fn != 1 or wt != 2:
+                continue
+            # 逐条兜异常:一行坏数据不该把同一个库里的好数据一起带走。
+            try:
+                step = _antigravity_gen_step(val, fallback_ts=fallback_ts)
+            except Exception:
+                step = None
+            if step is None:
+                continue
+            model, inp, out, cached, thoughts, ts_sec = step
+            iso_ts = datetime.fromtimestamp(ts_sec, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if iso_ts > max_ts:
+                max_ts = iso_ts
+            events.append({
+                "id": f"{os.path.basename(path)}:{idx}:{record_index}",
+                "timestamp": iso_ts,
+                "model": model,
+                "tokens": {
+                    "input": inp + cached,
+                    "output": out,
+                    "cached": cached,
+                    "thoughts": thoughts,
+                },
+            })
+            record_index += 1
+
+    if not events:
+        return None
+    sid = os.path.basename(path)
+    if sid.endswith(".db"):
+        sid = sid[:-3]
+    return {
+        "sid": sid,
+        "updated": max_ts,
+        "rank": 3,
+        "events": events,
+    }
 
 
 def _gemini_apply_messages(message_map, messages, replace=False):
@@ -2753,6 +3120,8 @@ def _gemini_apply_messages(message_map, messages, replace=False):
 
 
 def _load_gemini_usage_file(path):
+    if path.endswith(".db"):
+        return _load_antigravity_db(path)
     metadata = {}
     messages = {}
     rank = 2 if path.endswith(".jsonl") else 1
@@ -2845,7 +3214,9 @@ def scan_gemini(bounds, cache):
             stat = os.stat(path)
         except OSError:
             continue
-        signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        # SQLite 的新数据可能全在 -wal 里,主库 mtime/size 一动不动 —— 只看主库会永不刷新。
+        signature = (_sqlite_signature(path) if path.endswith(".db")
+                     else f"{stat.st_mtime_ns}:{stat.st_size}")
         entry = fc.get(path)
         if entry and entry.get("sig") == signature:
             continue
@@ -2902,6 +3273,7 @@ def scan_gemini(bounds, cache):
     B = {k: {"in": 0, "out": 0, "cached": 0, "thoughts": 0, "cost": 0.0,
              "models": {}, "sessions": set()}
          for k in RANGE_KEYS}
+    # 会话数只能来自现存日志(被清日志无从归属)
     for dk, day in days.items():
         try:
             d = date.fromisoformat(dk)
@@ -3460,6 +3832,1900 @@ def scan_grok_quota():
     return {}
 
 
+# ---------- 千问办公额度 (官方桌面端本机 MCP；需显式开启) ----------
+# 千问办公负责登录、token 刷新和服务端额度请求。Tokei 只调用它监听在
+# 127.0.0.1 的只读 qwenwork.usage 资源，不读取 auth-v2.dat 或浏览器 Cookie。
+_QWENWORK_QUOTA_TTL = 300
+_QWENWORK_QUOTA_FALLBACK_TTL = 3600
+_QWENWORK_MCP_TIMEOUT = 3
+_QWENWORK_MCP_MAX_CONFIG_BYTES = 16 * 1024
+_QWENWORK_MCP_MAX_RESPONSE_BYTES = 1024 * 1024
+_QWENWORK_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def _qwenwork_quota_enabled():
+    """默认关闭；开启后千问办公可能通过自己的登录态访问官方额度接口。"""
+    env = os.environ.get("TOKEI_QWENWORK_QUOTA")
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    return bool(_tokei_config().get("qwenwork_quota_enabled"))
+
+
+def _read_qwenwork_mcp_config(path=None):
+    """读取千问办公本机 MCP capability，拒绝宽权限文件和非 loopback URL。"""
+    import stat
+    from urllib.parse import urlsplit
+
+    config_path = path or QWENWORK_MCP_CONFIG
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = None
+    try:
+        fd = os.open(config_path, flags)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode)
+                or info.st_size <= 0
+                or info.st_size > _QWENWORK_MCP_MAX_CONFIG_BYTES):
+            return None
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            return None
+        # x-api-key 可调用适配器的其他工具；只信任当前用户私有的 0600 风格文件。
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            return None
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = None
+            config = json.load(fh)
+    except Exception:
+        return None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    if not isinstance(config, dict):
+        return None
+    url = config.get("url")
+    token = config.get("token")
+    if not isinstance(url, str) or not isinstance(token, str):
+        return None
+    try:
+        parsed = urlsplit(url.strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+            or parsed.username is not None or parsed.password is not None
+            or port is None or not 1 <= port <= 65535
+            or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+        return None
+    token = token.strip()
+    if re.fullmatch(r"[0-9a-fA-F]{64}", token) is None:
+        return None
+    mtime_ns = getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))
+    # .status.json 内容含账号资料，Tokei 不读取；仅把其文件 generation 纳入
+    # cache marker，使登录、退出或切换账号后的快照不会沿用旧额度。
+    status_marker = _qwenwork_private_file_marker(QWENWORK_STATUS)
+    marker = f"{info.st_dev}:{info.st_ino}:{mtime_ns}:{port}:{status_marker}"
+    return {"port": port, "token": token, "marker": marker}
+
+
+def _qwenwork_private_file_marker(path):
+    """只读取私有普通文件的元数据 generation，不读取文件内容。"""
+    import stat
+
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return "missing"
+    if (not stat.S_ISREG(info.st_mode)
+            or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+            or stat.S_IMODE(info.st_mode) & 0o077):
+        return "untrusted"
+    mtime_ns = getattr(info, "st_mtime_ns", int(info.st_mtime * 1_000_000_000))
+    return f"{info.st_dev}:{info.st_ino}:{mtime_ns}:{info.st_size}"
+
+
+def _qwenwork_mcp_rpc(config):
+    """固定调用 qwenwork.usage；http.client 不使用代理，也不会跟随重定向。"""
+    import http.client
+
+    request_body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "qw_query",
+            "arguments": {"key": "qwenwork.usage"},
+        },
+    }, separators=(",", ":")).encode("utf-8")
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", config["port"], timeout=_QWENWORK_MCP_TIMEOUT)
+    try:
+        connection.request("POST", "/", body=request_body, headers={
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "User-Agent": "Tokei",
+            "x-api-key": config["token"],
+        })
+        response = connection.getresponse()
+        if response.status != 200:
+            return None
+        payload = response.read(_QWENWORK_MCP_MAX_RESPONSE_BYTES + 1)
+        if len(payload) > _QWENWORK_MCP_MAX_RESPONSE_BYTES:
+            return None
+        text = payload.decode("utf-8")
+        content_type = (response.getheader("Content-Type") or "").lower()
+        if "text/event-stream" in content_type:
+            for line in text.splitlines():
+                if line.startswith("data:"):
+                    candidate = line[5:].strip()
+                    if candidate:
+                        return json.loads(candidate)
+            return None
+        return json.loads(text)
+    except Exception:
+        return None
+    finally:
+        connection.close()
+
+
+def _qwenwork_mcp_data(payload):
+    if not isinstance(payload, dict):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    envelope = result.get("structuredContent")
+    if not isinstance(envelope, dict):
+        # Older MCP clients may expose the same JSON envelope as text content.
+        for item in result.get("content") or []:
+            if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                continue
+            try:
+                candidate = json.loads(item["text"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(candidate, dict):
+                envelope = candidate
+                break
+    if not isinstance(envelope, dict) or envelope.get("ok") is False:
+        return None
+    if envelope.get("key") not in (None, "qwenwork.usage"):
+        return None
+    data = envelope.get("data")
+    if isinstance(data, dict):
+        return data
+    # Be tolerant if a future adapter returns the resource body directly.
+    if any(key in envelope for key in ("available", "segments", "planCredits")):
+        return envelope
+    return None
+
+
+def _qwenwork_number(value, *, percent=False):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    upper = 100.0 if percent else 1_000_000_000_000_000.0
+    return min(upper, max(0.0, number))
+
+
+def _qwenwork_epoch(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if not math.isfinite(float(value)):
+            return None
+        epoch = float(value)
+        if epoch > 1_000_000_000_000:
+            epoch /= 1000
+        return int(epoch) if 0 < epoch < 253_402_300_800 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        try:
+            return _qwenwork_epoch(float(stripped))
+        except ValueError:
+            return _iso_to_epoch(stripped)
+    return None
+
+
+def _qwenwork_safe_name(value, default):
+    value = str(value or "").strip()
+    return value if _QWENWORK_SAFE_NAME_RE.fullmatch(value) else default
+
+
+def _normalize_qwenwork_segment(item, index, *, default_id=None, default_kind=None):
+    if not isinstance(item, dict):
+        return None
+    segment_id = _qwenwork_safe_name(
+        item.get("id"), default_id or f"segment_{index + 1}")
+    kind = _qwenwork_safe_name(
+        item.get("kind"), default_kind or segment_id)
+    unit = item.get("unit")
+    unit = _qwenwork_safe_name(unit, "") if unit is not None else None
+    if not unit:
+        unit = None
+    total = _qwenwork_number(item.get("total"))
+    percentage_used = _qwenwork_number(
+        item.get("percentageUsed", item.get("percentage")), percent=True)
+    # total=0 means the denominator is unknown in current QwenWork responses.
+    # Keep the absolute balance, but do not turn percentageUsed=0 into a fake 100% remaining bar.
+    if total is None or total <= 0:
+        percentage_used = None
+    out = {
+        "id": segment_id,
+        "kind": kind,
+        "total": total,
+        "used": _qwenwork_number(item.get("used")),
+        "remaining": _qwenwork_number(item.get("remaining")),
+        "percentage_used": percentage_used,
+        "unit": unit,
+        "renews_at": _qwenwork_epoch(item.get("renewsAt", item.get("renews_at"))),
+        "expires_at": _qwenwork_epoch(item.get(
+            "expiresAt", item.get("planExpiration", item.get("expires_at")))),
+    }
+    if all(out.get(key) is None for key in ("total", "used", "remaining", "percentage_used")):
+        return None
+    return out
+
+
+def _normalize_qwenwork_shared(item):
+    if not isinstance(item, dict):
+        return None
+    unit = item.get("unit")
+    unit = _qwenwork_safe_name(unit, "") if unit is not None else None
+    if not unit:
+        unit = None
+    total = _qwenwork_number(
+        item.get("total", item.get("cap", item.get("allowance"))))
+    percentage_used = _qwenwork_number(
+        item.get("percentageUsed", item.get("percentage")), percent=True)
+    if total is None or total <= 0:
+        percentage_used = None
+    out = {
+        "total": total,
+        "used": _qwenwork_number(item.get("used")),
+        "remaining": _qwenwork_number(item.get("remaining")),
+        "percentage_used": percentage_used,
+        "unit": unit,
+        "expires_at": _qwenwork_epoch(item.get("expiresAt", item.get("expires_at"))),
+    }
+    numeric_keys = ("total", "used", "remaining", "percentage_used", "expires_at")
+    return out if any(out.get(key) is not None for key in numeric_keys) else None
+
+
+def _normalize_qwenwork_usage(data, *, updated=None):
+    if not isinstance(data, dict) or data.get("available") is False:
+        return None
+
+    segments = []
+    raw_segments = data.get("segments")
+    if isinstance(raw_segments, list):
+        for index, item in enumerate(raw_segments[:8]):
+            segment = _normalize_qwenwork_segment(item, index)
+            if segment:
+                segments.append(segment)
+
+    # planCredits/addOnCredits are mirrors of segments, never sum both shapes.
+    if not segments:
+        aliases = (
+            ("planCredits", "plan", "plan_credits"),
+            ("addOnCredits", "add_on", "add_on_credits"),
+        )
+        for key, segment_id, kind in aliases:
+            segment = _normalize_qwenwork_segment(
+                data.get(key), len(segments), default_id=segment_id, default_kind=kind)
+            if segment:
+                segments.append(segment)
+
+    remaining_values = []
+    for segment in segments:
+        unit = (segment.get("unit") or "").lower()
+        kind = segment.get("kind") or ""
+        is_credit = (unit in ("credit", "credits")) if unit else "credit" in kind.lower()
+        if segment.get("remaining") is not None and is_credit:
+            remaining_values.append(segment["remaining"])
+    remaining = sum(remaining_values) if remaining_values else None
+    if remaining is None:
+        remaining = _qwenwork_number(data.get("remaining", data.get("balance")))
+
+    remaining_pct = _qwenwork_number(data.get("aggregateRemainingPercent"), percent=True)
+    shared_source = data.get("sharedResourcePackage")
+    if not isinstance(shared_source, dict):
+        shared_source = data.get("sharedAddOnCredits")
+    shared = _normalize_qwenwork_shared(shared_source)
+    if remaining is None and remaining_pct is None and not segments and shared is None:
+        return None
+    return {
+        "available": True,
+        "remaining": remaining,
+        "remaining_pct": remaining_pct,
+        "exceeded": data.get("isQuotaExceeded") is True,
+        "is_team": data.get("isTeamPlan") is True,
+        "expires_at": _qwenwork_epoch(data.get("expiresAt")),
+        "plan_expiration": _qwenwork_epoch(data.get("planExpiration")),
+        "segments": segments,
+        "shared": shared,
+        "source": "mcp",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def _cached_qwenwork_quota(config_marker, max_age, *, stale=False):
+    cached = _load_json(QWENWORK_QUOTA_CACHE, {})
+    if not isinstance(cached, dict) or cached.get("config_marker") != config_marker:
+        return None
+    quota = cached.get("quota")
+    fetched_at = cached.get("fetched_at")
+    if not isinstance(quota, dict) or fetched_at is None:
+        return None
+    try:
+        age = datetime.now().timestamp() - float(fetched_at)
+    except (TypeError, ValueError):
+        return None
+    if age < -60 or age > max_age:
+        return None
+    out = dict(quota)
+    if stale:
+        out["source"] = "cache"
+        out["stale"] = True
+    return out
+
+
+def _save_qwenwork_quota_cache(quota, config_marker):
+    if not isinstance(quota, dict) or not quota.get("available"):
+        return
+    try:
+        _atomic_write_json(QWENWORK_QUOTA_CACHE, {
+            "fetched_at": datetime.now().timestamp(),
+            "config_marker": config_marker,
+            "quota": quota,
+        })
+        os.chmod(QWENWORK_QUOTA_CACHE, 0o600)
+    except Exception:
+        pass
+
+
+def _clear_qwenwork_quota_cache():
+    try:
+        os.remove(QWENWORK_QUOTA_CACHE)
+    except OSError:
+        pass
+
+
+def scan_qwenwork_quota():
+    """读取千问办公官方本机额度资源；不可用时静默降级，不自动启动客户端。"""
+    if not _qwenwork_quota_enabled():
+        return {}
+    config = _read_qwenwork_mcp_config()
+    if not config:
+        return {}
+    cached = _cached_qwenwork_quota(config["marker"], _QWENWORK_QUOTA_TTL)
+    if cached:
+        return cached
+
+    latest_config = config
+    for attempt in range(2):
+        if attempt:
+            latest_config = _read_qwenwork_mcp_config()
+            if not latest_config:
+                break
+        payload = _qwenwork_mcp_rpc(latest_config)
+        data = _qwenwork_mcp_data(payload)
+        if isinstance(data, dict) and data.get("available") is False:
+            _clear_qwenwork_quota_cache()
+            return {}
+        quota = _normalize_qwenwork_usage(data)
+        if quota:
+            _save_qwenwork_quota_cache(quota, latest_config["marker"])
+            return quota
+
+    fallback = _cached_qwenwork_quota(
+        latest_config["marker"], _QWENWORK_QUOTA_FALLBACK_TTL, stale=True)
+    return fallback or {}
+
+
+# ---------- CodexBar-compatible provider quotas ----------
+# Remote providers are opt-in. Antigravity is the exception: it only probes an
+# already-running loopback language server and never starts the app/CLI.
+_PROVIDER_QUOTA_TTL = 300
+_PROVIDER_QUOTA_FALLBACK_TTL = 3600
+_PROVIDER_QUOTA_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_PROVIDER_QUOTA_CACHE_LOCK = threading.Lock()
+_PROVIDER_QUOTA_ENV = {
+    "cursor": "TOKEI_CURSOR_QUOTA",
+    "zed": "TOKEI_ZED_QUOTA",
+    "sub2api": "TOKEI_SUB2API_QUOTA",
+    "zai": "TOKEI_ZAI_QUOTA",
+    "antigravity": "TOKEI_ANTIGRAVITY_QUOTA",
+}
+
+
+def _provider_quota_enabled(provider):
+    env_key = _PROVIDER_QUOTA_ENV.get(provider)
+    env = os.environ.get(env_key) if env_key else None
+    if env == "0":
+        return False
+    if env == "1":
+        return True
+    default = provider == "antigravity"
+    return bool(_tokei_config().get(f"{provider}_quota_enabled", default))
+
+
+def _provider_config_string(env_key, config_key):
+    value = os.environ.get(env_key)
+    if not isinstance(value, str) or not value.strip():
+        value = _tokei_config().get(config_key)
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _provider_number(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _provider_integer(value):
+    number = _provider_number(value)
+    return int(number) if number is not None and number.is_integer() else None
+
+
+def _provider_percent(value):
+    number = _provider_number(value)
+    return round(max(0.0, min(100.0, number)), 6) if number is not None else None
+
+
+def _provider_epoch(value):
+    number = _provider_number(value)
+    if number is not None:
+        if number > 100_000_000_000:
+            number /= 1000.0
+        return int(number) if number > 0 else None
+    parsed = parse_ts(value) if isinstance(value, str) else None
+    return int(parsed.timestamp()) if parsed else None
+
+
+def _provider_money(value, unit="USD"):
+    number = _provider_number(value)
+    if number is None:
+        return None
+    if str(unit or "USD").upper() == "USD":
+        return f"${number:,.2f}"
+    return f"{number:,.2f} {unit}"
+
+
+_PROVIDER_USAGE_FIELDS = ("in", "out", "cr", "cw", "reason")
+
+
+def _provider_usage_int(value):
+    number = _provider_integer(value)
+    return number if number is not None and number >= 0 else 0
+
+
+def _provider_usage_from_days(days, *, bounds=None, limited_coverage=None):
+    bounds = bounds or range_bounds()
+    buckets = {
+        key: {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+              "reason": 0, "cost": 0.0, "requests": 0, "models": {}}
+        for key in RANGE_KEYS
+    }
+    clean_days = days if isinstance(days, dict) else {}
+    for day_key, day in clean_days.items():
+        if not isinstance(day, dict):
+            continue
+        try:
+            local_day = date.fromisoformat(str(day_key)[:10])
+        except ValueError:
+            continue
+        components = {field: _provider_usage_int(day.get(field))
+                      for field in _PROVIDER_USAGE_FIELDS}
+        total = _provider_usage_int(day.get("tokens")) or sum(components.values())
+        cost = _provider_number(day.get("cost")) or 0.0
+        cost = cost if cost >= 0 else 0.0
+        requests = _provider_usage_int(day.get("requests"))
+        models = day.get("models") if isinstance(day.get("models"), dict) else {}
+        for range_key in classify_date(local_day, bounds):
+            bucket = buckets[range_key]
+            bucket["tokens"] += total
+            bucket["cost"] += cost
+            bucket["requests"] += requests
+            for field, value in components.items():
+                bucket[field] += value
+            for raw_name, raw_usage in models.items():
+                if not isinstance(raw_usage, dict):
+                    continue
+                model = bucket["models"].setdefault(
+                    str(raw_name or "unknown"),
+                    {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                     "reason": 0, "cost": 0.0})
+                model_components = {field: _provider_usage_int(raw_usage.get(field))
+                                    for field in _PROVIDER_USAGE_FIELDS}
+                model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
+                    or sum(model_components.values())
+                for field, value in model_components.items():
+                    model[field] += value
+                model_cost = _provider_number(raw_usage.get("cost")) or 0.0
+                if model_cost >= 0:
+                    model["cost"] += model_cost
+
+    ranges = {}
+    for range_key, bucket in buckets.items():
+        formatted = {}
+        for raw_name, usage in bucket.pop("models").items():
+            display_name = nice_model(raw_name)
+            model = formatted.setdefault(
+                display_name,
+                {"name": display_name, "tokens": 0, "in": 0, "out": 0,
+                 "cr": 0, "cw": 0, "reason": 0, "cost": 0.0})
+            for field in ("tokens",) + _PROVIDER_USAGE_FIELDS:
+                model[field] += usage[field]
+            model["cost"] += usage["cost"]
+        row = dict(bucket)
+        input_total = row["in"] + row["cr"] + row["cw"]
+        row["hit"] = row["cr"] / input_total * 100 if input_total else 0.0
+        row["cost"] = round(row["cost"], 6)
+        row["models"] = sorted(
+            formatted.values(), key=lambda item: (-item["tokens"], item["name"]))
+        for model in row["models"]:
+            model["cost"] = round(model["cost"], 6)
+        if limited_coverage and range_key in {"year", "all"}:
+            row["coverage"] = limited_coverage
+        ranges[range_key] = row
+    return {"ranges": ranges, "days": clean_days}
+
+
+def _provider_window(window_id, title, used_pct=None, reset=None, window_minutes=None,
+                     detail=None, usage_known=True):
+    return {
+        "id": str(window_id),
+        "title": str(title),
+        "used_pct": _provider_percent(used_pct),
+        "reset": _provider_epoch(reset),
+        "window_minutes": int(window_minutes) if isinstance(window_minutes, (int, float))
+        and window_minutes > 0 else None,
+        "detail": str(detail) if detail else None,
+        "usage_known": bool(usage_known),
+    }
+
+
+def _provider_credential_marker(provider, *parts):
+    material = "\0".join(str(part or "") for part in (provider,) + parts)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=False):
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+    entry = (root.get("providers") or {}).get(provider) if isinstance(root, dict) else None
+    if not isinstance(entry, dict) or entry.get("marker") != marker:
+        return None
+    fetched_at = _provider_number(entry.get("fetched_at"))
+    quota = entry.get("quota")
+    now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    if fetched_at is None or not isinstance(quota, dict):
+        return None
+    age = now_epoch - int(fetched_at)
+    if age < -300 or age > max_age:
+        return None
+    out = json.loads(json.dumps(quota))
+    if stale:
+        out["stale"] = True
+        out["source"] = "cache"
+    return out
+
+
+def _save_provider_quota_cache(provider, marker, quota, fetched_at=None):
+    if not isinstance(quota, dict) or not quota.get("available"):
+        return
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+        if not isinstance(root, dict):
+            root = {}
+        providers = root.get("providers")
+        if not isinstance(providers, dict):
+            providers = {}
+        providers[provider] = {
+            "marker": marker,
+            "fetched_at": int(fetched_at if fetched_at is not None else datetime.now().timestamp()),
+            "quota": quota,
+        }
+        root = {"version": 1, "providers": providers}
+        try:
+            _atomic_write_json(PROVIDER_QUOTA_CACHE, root)
+            os.chmod(PROVIDER_QUOTA_CACHE, 0o600)
+        except OSError:
+            pass
+
+
+def _provider_json_request(url, *, headers=None, method="GET", body=None, timeout=5,
+                           max_bytes=_PROVIDER_QUOTA_MAX_RESPONSE_BYTES,
+                           allow_insecure_loopback_tls=False):
+    import ssl
+    import urllib.error
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    raw_body = None
+    request_headers = dict(headers or {})
+    if body is not None:
+        raw_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+    request_headers.setdefault("Accept", "application/json")
+    request = urllib.request.Request(
+        url, data=raw_body, headers=request_headers, method=method)
+    context = None
+    parsed = urlsplit(url)
+    if allow_insecure_loopback_tls and parsed.scheme == "https" \
+            and parsed.hostname in {"127.0.0.1", "::1", "localhost"}:
+        context = ssl._create_unverified_context()
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, response_headers, new_url):
+            return None
+
+    handlers = [NoRedirect()]
+    if context is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
+    opener = urllib.request.build_opener(*handlers)
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            data = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as error:
+        status = error.code
+        error.close()
+        raise RuntimeError(f"HTTP {status}") from error
+    if len(data) > max_bytes:
+        raise ValueError("provider response too large")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as error:
+        raise ValueError("provider response was not valid JSON") from error
+
+
+# ----- Cursor -----
+
+_CURSOR_USAGE_PAGE_SIZE = 1000
+_CURSOR_USAGE_MAX_PAGES = 200
+
+
+def _cursor_app_auth_paths():
+    return _path_candidates(
+        "TOKEI_CURSOR_AUTH_DB",
+        os.path.join(HOME, "Library", "Application Support", "Cursor",
+                     "User", "globalStorage", "state.vscdb"),
+        os.path.join(HOME, ".config", "Cursor", "User",
+                     "globalStorage", "state.vscdb"))
+
+
+def _cursor_app_session(path=None, now_epoch=None):
+    db_path = path or _first_existing_file(_cursor_app_auth_paths())
+    if not db_path or not os.path.isfile(db_path):
+        return None
+    try:
+        connection = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True, timeout=0.25)
+        row = connection.execute(
+            "SELECT value FROM ItemTable WHERE key = ? LIMIT 1",
+            ("cursorAuth/accessToken",)).fetchone()
+        connection.close()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    token = row[0]
+    if isinstance(token, bytes):
+        token = token.decode("utf-8", "ignore")
+    if not isinstance(token, str) or not token.strip():
+        return None
+    token = token.strip()
+    claims = _decode_jwt_claims(token) or {}
+    subject = claims.get("sub") if isinstance(claims.get("sub"), str) else None
+    user_id = subject.rsplit("|", 1)[-1] if subject else None
+    if not user_id or not re.fullmatch(r"[A-Za-z0-9._-]+", user_id):
+        return None
+    expiration = _provider_number(claims.get("exp"))
+    now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    if expiration is None or expiration <= now_epoch + 60:
+        return None
+    email = claims.get("email") if isinstance(claims.get("email"), str) else None
+    return {
+        "cookie": f"WorkosCursorSessionToken={user_id}%3A%3A{token}",
+        "account": email.strip() if email and email.strip() else subject,
+        "subject": subject,
+        "user_id": user_id,
+        "marker": _provider_credential_marker("cursor", subject, token),
+    }
+
+
+def _cursor_cookie_session(cookie):
+    if not isinstance(cookie, str) or not cookie.strip():
+        return None
+    from urllib.parse import unquote
+
+    account = subject = user_id = None
+    for component in cookie.split(";"):
+        name, separator, value = component.strip().partition("=")
+        if separator and name == "WorkosCursorSessionToken":
+            token = unquote(value).split("::")[-1]
+            claims = _decode_jwt_claims(token) or {}
+            subject = claims.get("sub") if isinstance(claims.get("sub"), str) else None
+            user_id = subject.rsplit("|", 1)[-1] if subject else None
+            email = claims.get("email")
+            account = email.strip() if isinstance(email, str) and email.strip() else subject
+            break
+    return {
+        "cookie": cookie.strip(),
+        "account": account,
+        "subject": subject,
+        "user_id": user_id,
+        "marker": _provider_credential_marker("cursor", cookie.strip()),
+    }
+
+
+def _cursor_session():
+    manual = _provider_config_string("TOKEI_CURSOR_COOKIE", "cursor_cookie")
+    return _cursor_cookie_session(manual) if manual else _cursor_app_session()
+
+
+def _cursor_plan_name(raw):
+    names = {
+        "enterprise": "Enterprise", "express": "Start", "free": "Free",
+        "free_trial": "Pro Trial", "hobby": "Hobby", "pro": "Pro",
+        "pro_student": "Pro", "pro_plus": "Pro+", "team": "Team",
+        "ultra": "Ultra",
+    }
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = names.get(raw.strip().lower(), raw.strip())
+    return f"Cursor {value}"
+
+
+def _normalize_cursor_usage_events(events, *, bounds=None):
+    days = {}
+    for event in events if isinstance(events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        timestamp = _provider_number(event.get("timestamp"))
+        usage = event.get("tokenUsage")
+        if timestamp is None or timestamp <= 0 or not isinstance(usage, dict):
+            continue
+        timestamp_seconds = timestamp / 1000.0 if timestamp > 100_000_000_000 else timestamp
+        try:
+            dt = datetime.fromtimestamp(timestamp_seconds, timezone.utc).astimezone()
+        except (OverflowError, OSError, ValueError):
+            continue
+        components = {
+            "in": _provider_usage_int(usage.get("inputTokens")),
+            "out": _provider_usage_int(usage.get("outputTokens")),
+            "cr": _provider_usage_int(usage.get("cacheReadTokens")),
+            "cw": _provider_usage_int(usage.get("cacheWriteTokens")),
+            "reason": 0,
+        }
+        total = sum(components.values())
+        if total <= 0:
+            continue
+        cents = _provider_number(usage.get("totalCents"))
+        cost = cents / 100.0 if cents is not None and cents >= 0 else 0.0
+        model_name = event.get("model")
+        model_name = model_name.strip() if isinstance(model_name, str) and model_name.strip() else "unknown"
+        day_key = dt.date().isoformat()
+        day = days.setdefault(
+            day_key,
+            {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+             "reason": 0, "cost": 0.0, "requests": 0, "models": {},
+             "hours": [0] * 24})
+        day["tokens"] += total
+        day["cost"] += cost
+        day["requests"] += 1
+        day["hours"][dt.hour] += total
+        for field, value in components.items():
+            day[field] += value
+        model = day["models"].setdefault(
+            model_name,
+            {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+             "reason": 0, "cost": 0.0})
+        model["tokens"] += total
+        model["cost"] += cost
+        for field, value in components.items():
+            model[field] += value
+    return _provider_usage_from_days(days, bounds=bounds)
+
+
+def _cursor_boundary_overlap(previous, current):
+    limit = min(len(previous), len(current))
+    for count in range(limit, 0, -1):
+        if previous[-count:] == current[:count]:
+            return count
+    return 0
+
+
+def _fetch_cursor_usage_events(session, now=None):
+    now = now or datetime.now().astimezone()
+    start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    headers = {"Cookie": session["cookie"], "Origin": "https://cursor.com"}
+    pages = []
+    expected_total = None
+    completed = False
+    for page_number in range(1, _CURSOR_USAGE_MAX_PAGES + 1):
+        payload = _provider_json_request(
+            "https://cursor.com/api/dashboard/get-filtered-usage-events",
+            headers=headers, method="POST", timeout=15, max_bytes=16 * 1024 * 1024,
+            body={
+                "page": page_number,
+                "pageSize": _CURSOR_USAGE_PAGE_SIZE,
+                "startDate": str(int(start.timestamp() * 1000)),
+                "endDate": str(int(now.timestamp() * 1000)),
+            })
+        reported = _provider_integer(payload.get("totalUsageEventsCount")) \
+            if isinstance(payload, dict) else None
+        if reported is not None and reported < 0:
+            raise ValueError("cursor usage event count cannot be negative")
+        if reported is not None:
+            if expected_total is not None and reported != expected_total:
+                raise ValueError("cursor usage pagination count changed")
+            expected_total = reported
+        events = payload.get("usageEventsDisplay") if isinstance(payload, dict) else None
+        if not isinstance(events, list):
+            raise ValueError("cursor usage events response was invalid")
+        if not events:
+            completed = True
+            break
+        pages.append(events)
+        if len(events) < _CURSOR_USAGE_PAGE_SIZE:
+            completed = True
+            break
+    if not completed:
+        raise ValueError("cursor usage pagination did not complete")
+    raw = [event for page in pages for event in page]
+    if expected_total is None:
+        return raw
+    if len(raw) < expected_total:
+        raise ValueError("cursor usage pagination was incomplete")
+    if len(raw) == expected_total:
+        return raw
+    removals = len(raw) - expected_total
+    reconciled = list(pages[0]) if pages else []
+    for index in range(1, len(pages)):
+        overlap = min(_cursor_boundary_overlap(pages[index - 1], pages[index]), removals)
+        reconciled.extend(pages[index][overlap:])
+        removals -= overlap
+    if removals or len(reconciled) != expected_total:
+        raise ValueError("cursor usage pagination was inconsistent")
+    return reconciled
+
+
+def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, user_info=None,
+                            identity=None, updated=None):
+    if not isinstance(summary, dict):
+        return {}
+    individual = summary.get("individualUsage") if isinstance(
+        summary.get("individualUsage"), dict) else {}
+    team = summary.get("teamUsage") if isinstance(summary.get("teamUsage"), dict) else {}
+    plan = individual.get("plan") if isinstance(individual.get("plan"), dict) else {}
+    overall = individual.get("overall") if isinstance(individual.get("overall"), dict) else {}
+    pooled = team.get("pooled") if isinstance(team.get("pooled"), dict) else {}
+
+    plan_used = _provider_number(plan.get("used")) or 0.0
+    plan_limit = _provider_number(plan.get("limit")) or 0.0
+    auto_pct = _provider_percent(plan.get("autoPercentUsed"))
+    api_pct = _provider_percent(plan.get("apiPercentUsed"))
+    total_pct = _provider_percent(plan.get("totalPercentUsed"))
+    if total_pct is None and auto_pct is not None and api_pct is not None:
+        total_pct = _provider_percent((auto_pct + api_pct) / 2)
+    if total_pct is None:
+        total_pct = api_pct if api_pct is not None else auto_pct
+    if total_pct is None and plan_limit > 0:
+        total_pct = _provider_percent(plan_used / plan_limit * 100)
+    if total_pct is None:
+        for block in (overall, pooled):
+            used = _provider_number(block.get("used"))
+            limit = _provider_number(block.get("limit"))
+            if used is not None and limit is not None and limit > 0:
+                total_pct = _provider_percent(used / limit * 100)
+                plan_used, plan_limit = used, limit
+                break
+    total_pct = total_pct if total_pct is not None else 0.0
+
+    request_block = request_usage.get("gpt-4") if isinstance(request_usage, dict) \
+        and isinstance(request_usage.get("gpt-4"), dict) else {}
+    requests_used = _provider_number(
+        request_block.get("numRequestsTotal") if request_block.get("numRequestsTotal") is not None
+        else request_block.get("numRequests"))
+    requests_limit = _provider_number(request_block.get("maxRequestUsage"))
+    legacy = requests_used is not None and requests_limit is not None and requests_limit > 0
+
+    cycle_start = _provider_epoch(summary.get("billingCycleStart"))
+    cycle_end = _provider_epoch(summary.get("billingCycleEnd"))
+    window_minutes = int((cycle_end - cycle_start) / 60) \
+        if cycle_start and cycle_end and cycle_end > cycle_start else None
+    if legacy:
+        total_pct = _provider_percent(requests_used / requests_limit * 100)
+        primary_detail = f"{int(requests_used)} / {int(requests_limit)} requests"
+    else:
+        primary_detail = (
+            f"{_provider_money(plan_used / 100)} / {_provider_money(plan_limit / 100)}"
+            if plan_limit > 0 else None)
+
+    windows = [_provider_window(
+        "cursor-total", "总额度", total_pct, cycle_end, window_minutes, primary_detail)]
+    if not legacy:
+        if auto_pct is not None:
+            windows.append(_provider_window(
+                "cursor-auto", "Cursor 模型", auto_pct, cycle_end, window_minutes))
+        if api_pct is not None:
+            windows.append(_provider_window(
+                "cursor-api", "第三方模型", api_pct, cycle_end, window_minutes))
+        if isinstance(sand_usage, dict) and sand_usage.get("hasNonZeroIncludedLimit") is True:
+            sand_pct = _provider_percent(sand_usage.get("usagePercent"))
+            if sand_pct is not None:
+                sand_start = _provider_epoch(sand_usage.get("currentPeriodStart"))
+                sand_reset = _provider_epoch(sand_usage.get("nextResetTimestampUtc"))
+                sand_minutes = int((sand_reset - sand_start) / 60) \
+                    if sand_start and sand_reset and sand_reset > sand_start else None
+                windows.append(_provider_window(
+                    "cursor-grok-bot", "Grok Bot", sand_pct, sand_reset, sand_minutes))
+
+    details = []
+    if plan_limit > 0 and not legacy:
+        details.append({
+            "label": "套餐用量",
+            "value": f"{_provider_money(plan_used / 100)} / {_provider_money(plan_limit / 100)}",
+        })
+    on_demand = individual.get("onDemand") if isinstance(individual.get("onDemand"), dict) else {}
+    team_on_demand = team.get("onDemand") if isinstance(team.get("onDemand"), dict) else {}
+    on_used = _provider_number(on_demand.get("used")) or 0.0
+    on_limit = _provider_number(on_demand.get("limit"))
+    if not on_limit or on_limit <= 0:
+        team_limit = _provider_number(team_on_demand.get("limit"))
+        if team_limit and team_limit > 0:
+            on_used = _provider_number(team_on_demand.get("used")) or 0.0
+            on_limit = team_limit
+    if on_limit and on_limit > 0:
+        details.append({
+            "label": "按量预算",
+            "value": f"{_provider_money(on_used / 100)} / {_provider_money(on_limit / 100)}",
+        })
+
+    user_info = user_info if isinstance(user_info, dict) else {}
+    identity = identity if isinstance(identity, dict) else {}
+    account = user_info.get("email") or identity.get("account")
+    return {
+        "available": True,
+        "plan": _cursor_plan_name(summary.get("membershipType")),
+        "account": account,
+        "windows": windows,
+        "details": details,
+        "source": "cursor-api",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_cursor_quota(session=None):
+    session = session or _cursor_session()
+    if not session:
+        return {}
+    marker = _provider_credential_marker("cursor-usage-v1", session["marker"])
+    cached = _cached_provider_quota("cursor", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    headers = {"Cookie": session["cookie"]}
+    base = "https://cursor.com"
+    try:
+        summary = _provider_json_request(base + "/api/usage-summary", headers=headers)
+        user_info = None
+        try:
+            user_info = _provider_json_request(base + "/api/auth/me", headers=headers)
+        except Exception:
+            pass
+        request_usage = None
+        user_id = (user_info or {}).get("sub") if isinstance(user_info, dict) else None
+        user_id = user_id or session.get("subject") or session.get("user_id")
+        if isinstance(user_id, str) and user_id:
+            user_id = user_id.rsplit("|", 1)[-1]
+            from urllib.parse import quote
+            try:
+                request_usage = _provider_json_request(
+                    base + "/api/usage?user=" + quote(user_id, safe=""), headers=headers)
+            except Exception:
+                pass
+        sand_usage = None
+        try:
+            sand_usage = _provider_json_request(
+                base + "/api/dashboard/get-sand-usage-status",
+                headers={**headers, "Origin": base}, method="POST", body={})
+        except Exception:
+            pass
+        usage = _provider_usage_from_days({})
+        try:
+            usage = _normalize_cursor_usage_events(_fetch_cursor_usage_events(session))
+        except Exception:
+            pass
+        quota = _normalize_cursor_quota(
+            summary, request_usage=request_usage, sand_usage=sand_usage,
+            user_info=user_info, identity=session)
+        quota["usage"] = usage
+        _save_provider_quota_cache("cursor", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "cursor", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_cursor_quota():
+    return fetch_cursor_quota() if _provider_quota_enabled("cursor") else {}
+
+
+# ----- Zed -----
+
+
+def _zed_connection_settings(settings):
+    settings = settings if isinstance(settings, dict) else {}
+    credentials = settings.get("credentials_url")
+    server = settings.get("server_url")
+    credentials = credentials.strip() if isinstance(credentials, str) and credentials.strip() else None
+    server = server.strip().rstrip("/") if isinstance(server, str) and server.strip() else "https://zed.dev"
+    service = credentials or server
+    trusted = server in {"https://zed.dev", "https://staging.zed.dev"}
+    if not trusted and credentials and credentials.rstrip("/") != server:
+        return None
+    from urllib.parse import urlsplit
+    parsed = urlsplit(server)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password \
+            or parsed.query or parsed.fragment:
+        return None
+    api_base = "https://cloud.zed.dev" if trusted else server
+    return {"service": service, "api_url": api_base + "/client/users/me"}
+
+
+def _load_zed_connection_settings(path=None):
+    path = path or _provider_config_string(
+        "TOKEI_ZED_SETTINGS", "zed_settings_path") \
+        or os.path.join(HOME, ".config", "zed", "settings.json")
+    settings = _load_json(path, {}) if os.path.isfile(path) else {}
+    return _zed_connection_settings(settings)
+
+
+def _zed_plan_name(raw):
+    names = {
+        "zed_free": "Zed Free", "zed_pro": "Zed Pro",
+        "zed_pro_trial": "Zed Pro Trial", "zed_student": "Zed Student",
+        "zed_business": "Zed Business",
+    }
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip()
+    return names.get(value.lower(), " ".join(word.capitalize() for word in value.split("_")))
+
+
+def _normalize_zed_quota(payload, updated=None):
+    if not isinstance(payload, dict):
+        return {}
+    user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+    usage = plan.get("usage") if isinstance(plan.get("usage"), dict) else {}
+    predictions = usage.get("edit_predictions") if isinstance(
+        usage.get("edit_predictions"), dict) else {}
+    used = max(0.0, _provider_number(predictions.get("used")) or 0.0)
+    limit_value = predictions.get("limit")
+    if isinstance(limit_value, dict):
+        limit_value = limit_value.get("limited")
+    windows = []
+    if isinstance(limit_value, str) and limit_value.lower() == "unlimited":
+        windows.append(_provider_window(
+            "zed-predictions", "Edit Predictions", 0, detail="Unlimited"))
+    else:
+        limit = _provider_number(limit_value)
+        if limit is not None and limit > 0:
+            clamped = min(used, limit)
+            windows.append(_provider_window(
+                "zed-predictions", "Edit Predictions", clamped / limit * 100,
+                detail=f"{int(clamped)} / {int(limit)} predictions"))
+
+    period = plan.get("subscription_period") if isinstance(
+        plan.get("subscription_period"), dict) else {}
+    start = _provider_epoch(period.get("started_at"))
+    end = _provider_epoch(period.get("ended_at"))
+    now = int(updated if updated is not None else datetime.now().timestamp())
+    if start and end and end > start:
+        windows.append(_provider_window(
+            "zed-cycle", "订阅周期", (now - start) / (end - start) * 100, end,
+            int((end - start) / 60)))
+    if plan.get("has_overdue_invoices") is True:
+        windows.append(_provider_window(
+            "zed-overdue", "账单", None, detail="Overdue invoices", usage_known=False))
+
+    details = []
+    if isinstance(user.get("name"), str) and user["name"].strip():
+        details.append({"label": "账号", "value": user["name"].strip()})
+    return {
+        "available": bool(windows or plan),
+        "plan": _zed_plan_name(plan.get("plan_v3")),
+        "account": user.get("github_login"),
+        "windows": windows,
+        "details": details,
+        "source": "zed-cloud",
+        "updated": now,
+        "stale": False,
+    }
+
+
+def fetch_zed_quota():
+    user_id = _provider_config_string("TOKEI_ZED_USER_ID", "zed_user_id")
+    token = _provider_config_string("TOKEI_ZED_ACCESS_TOKEN", "zed_access_token")
+    connection = _load_zed_connection_settings()
+    if not user_id or not token or not connection:
+        return {}
+    marker = _provider_credential_marker(
+        "zed", user_id, token, connection["service"], connection["api_url"])
+    cached = _cached_provider_quota("zed", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    try:
+        payload = _provider_json_request(
+            connection["api_url"], headers={"Authorization": f"{user_id} {token}"})
+        quota = _normalize_zed_quota(payload)
+        _save_provider_quota_cache("zed", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "zed", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_zed_quota():
+    return fetch_zed_quota() if _provider_quota_enabled("zed") else {}
+
+
+# ----- sub2api -----
+
+
+def _local_timezone_name():
+    configured = os.environ.get("TZ")
+    if configured and configured.strip():
+        return configured.strip()
+    try:
+        target = os.path.realpath("/etc/localtime")
+        marker = "/zoneinfo/"
+        if marker in target:
+            return target.split(marker, 1)[1]
+    except OSError:
+        pass
+    zone = datetime.now().astimezone().tzinfo
+    return getattr(zone, "key", None) or datetime.now().astimezone().tzname() or "UTC"
+
+
+def _sub2api_usage_url(base_url, timezone_name=None):
+    if not isinstance(base_url, str) or not base_url.strip():
+        return None
+    import ipaddress
+    from urllib.parse import urlencode, urlsplit, urlunsplit
+
+    parsed = urlsplit(base_url.strip())
+    if parsed.scheme not in {"https", "http"} or not parsed.hostname \
+            or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    if parsed.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = parsed.hostname.lower() == "localhost"
+        if not loopback:
+            return None
+    path = parsed.path.rstrip("/")
+    if not re.search(r"/v1(?:/usage)?$", path):
+        path += "/v1"
+    if not path.endswith("/usage"):
+        path += "/usage"
+    query = urlencode({"days": 30, "timezone": timezone_name or _local_timezone_name()})
+    return urlunsplit((parsed.scheme, parsed.netloc, path, query, ""))
+
+
+def _normalize_sub2api_quota(data, updated=None):
+    if not isinstance(data, dict) or data.get("isValid") is False:
+        return {}
+    unit = data.get("unit") if isinstance(data.get("unit"), str) else "USD"
+    windows = []
+
+    def add_window(window_id, title, used, limit, minutes=None, reset=None, value_unit=None):
+        used_number = _provider_number(used)
+        limit_number = _provider_number(limit)
+        if used_number is None or limit_number is None or limit_number <= 0:
+            return
+        detail = f"{_provider_money(used_number, value_unit or unit)} / " \
+            f"{_provider_money(limit_number, value_unit or unit)}"
+        windows.append(_provider_window(
+            window_id, title, used_number / limit_number * 100, reset, minutes, detail))
+
+    subscription = data.get("subscription") if isinstance(data.get("subscription"), dict) else None
+    quota = data.get("quota") if isinstance(data.get("quota"), dict) else None
+    if subscription:
+        add_window("sub2api-daily", "日额度", subscription.get("daily_usage_usd"),
+                   subscription.get("daily_limit_usd"), 1440)
+        add_window("sub2api-weekly", "周额度", subscription.get("weekly_usage_usd"),
+                   subscription.get("weekly_limit_usd"), 10080)
+        add_window("sub2api-monthly", "月额度", subscription.get("monthly_usage_usd"),
+                   subscription.get("monthly_limit_usd"), 43200)
+    elif quota:
+        quota_unit = quota.get("unit") if isinstance(quota.get("unit"), str) else unit
+        add_window("sub2api-quota", "额度", quota.get("used"), quota.get("limit"),
+                   value_unit=quota_unit)
+
+    rate_minutes = {"5h": 300, "1d": 1440, "7d": 10080}
+    rate_titles = {"5h": "5h 额度", "1d": "日限额", "7d": "周限额"}
+    rates = data.get("rate_limits") if isinstance(data.get("rate_limits"), list) else []
+    for index, rate in enumerate(rates):
+        if not isinstance(rate, dict):
+            continue
+        name = str(rate.get("window") or f"rate-{index}")
+        add_window(
+            f"sub2api-{name}", rate_titles.get(name.lower(), f"{name} 限额"),
+            rate.get("used"), rate.get("limit"), rate_minutes.get(name.lower()),
+            rate.get("reset_at"))
+
+    details = []
+    balance = _provider_number(data.get("balance"))
+    if balance is not None:
+        details.append({"label": "余额", "value": _provider_money(balance, unit)})
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    for key, label in (("today", "今日"), ("total", "累计")):
+        row = usage.get(key) if isinstance(usage.get(key), dict) else None
+        if not row:
+            continue
+        requests = 0 if row.get("requests") is None else _provider_integer(row.get("requests"))
+        tokens = 0 if row.get("total_tokens") is None else _provider_integer(row.get("total_tokens"))
+        if requests is None or tokens is None:
+            raise ValueError(f"sub2api {key} usage counts must be integers")
+        cost = _provider_number(row.get("actual_cost")) or 0
+        details.append({"label": f"{label}请求", "value": f"{requests:,}"})
+        token_row = {"label": f"{label} Token", "value": f"{tokens:,}"}
+        if cost:
+            token_row["secondary"] = _provider_money(cost)
+        details.append(token_row)
+
+    expiration = (subscription or {}).get("expires_at") or data.get("expires_at")
+    expiration_epoch = _provider_epoch(expiration)
+    if expiration_epoch:
+        details.append({"label": "套餐到期", "value": str(expiration_epoch)})
+    plan_name = data.get("planName") if isinstance(data.get("planName"), str) else None
+    return {
+        "available": bool(windows or details or plan_name),
+        "plan": plan_name,
+        "account": None,
+        "windows": windows,
+        "details": details,
+        "source": "sub2api",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_sub2api_quota():
+    api_key = _provider_config_string("SUB2API_API_KEY", "sub2api_api_key")
+    base_url = _provider_config_string("SUB2API_BASE_URL", "sub2api_base_url")
+    usage_url = _sub2api_usage_url(base_url) if base_url else None
+    if not api_key or not usage_url:
+        return {}
+    marker = _provider_credential_marker("sub2api", api_key, usage_url)
+    cached = _cached_provider_quota("sub2api", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    try:
+        payload = _provider_json_request(
+            usage_url, headers={"Authorization": f"Bearer {api_key}"}, timeout=15)
+        if isinstance(payload, dict) and payload.get("isValid") is False:
+            raise PermissionError("sub2api rejected the API key")
+        quota = _normalize_sub2api_quota(payload)
+        _save_provider_quota_cache("sub2api", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "sub2api", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_sub2api_quota():
+    return fetch_sub2api_quota() if _provider_quota_enabled("sub2api") else {}
+
+
+# ----- z.ai / GLM -----
+
+
+def _zai_quota_url(url, scope="personal"):
+    if scope != "team":
+        return url
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parsed = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+             if key != "type"]
+    query.append(("type", "2"))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+
+
+def _zai_model_usage_url(base, scope="personal", now=None):
+    from urllib.parse import urlencode
+    now = now or datetime.now().astimezone()
+    start = (now - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = now.replace(minute=59, second=59, microsecond=0)
+    query = {
+        "startTime": start.strftime("%Y-%m-%d %H:%M:%S"),
+        "endTime": end.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if scope == "team":
+        query["type"] = "3"
+    return base.rstrip("/") + "/api/monitor/usage/model-usage?" + urlencode(query)
+
+
+def _normalize_zai_model_usage(payload, *, bounds=None):
+    if not isinstance(payload, dict) or payload.get("success") is not True \
+            or _provider_number(payload.get("code")) != 200:
+        return _provider_usage_from_days({}, bounds=bounds, limited_coverage="近30天")
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    labels = data.get("x_time") if isinstance(data.get("x_time"), list) else []
+    models = data.get("modelDataList") \
+        if isinstance(data.get("modelDataList"), list) else []
+    parsed_labels = []
+    for label in labels:
+        if not isinstance(label, str):
+            parsed_labels.append(None)
+            continue
+        try:
+            parsed_labels.append(datetime.fromisoformat(label).astimezone())
+        except ValueError:
+            parsed_labels.append(None)
+    days = {}
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = model.get("modelName")
+        name = name.strip() if isinstance(name, str) and name.strip() else "unknown"
+        values = model.get("tokensUsage") if isinstance(model.get("tokensUsage"), list) else []
+        for index, dt in enumerate(parsed_labels):
+            if dt is None or index >= len(values):
+                continue
+            tokens = _provider_usage_int(values[index])
+            if tokens <= 0:
+                continue
+            day_key = dt.date().isoformat()
+            day = days.setdefault(
+                day_key,
+                {"tokens": 0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                 "reason": 0, "cost": 0.0, "requests": 0, "models": {},
+                 "hours": [0] * 24})
+            day["tokens"] += tokens
+            day["hours"][dt.hour] += tokens
+            usage = day["models"].setdefault(name, {"tokens": 0})
+            usage["tokens"] += tokens
+    return _provider_usage_from_days(days, bounds=bounds, limited_coverage="近30天")
+
+
+def _zai_limit(raw):
+    if not isinstance(raw, dict) or raw.get("type") not in {
+            "TOKENS_LIMIT", "CREDIT_LIMIT", "TIME_LIMIT"}:
+        return None
+    unit = _provider_integer(raw.get("unit"))
+    number = _provider_integer(raw.get("number"))
+    percent_raw = _provider_integer(raw.get("percentage"))
+    percent = _provider_percent(percent_raw)
+    if unit is None or number is None or percent is None:
+        return None
+    usage = _provider_number(raw.get("usage"))
+    current = _provider_number(raw.get("currentValue"))
+    remaining = _provider_number(raw.get("remaining"))
+    if usage is not None and usage > 0:
+        used = None
+        if remaining is not None:
+            used = max(usage - remaining, current if current is not None else usage - remaining)
+        elif current is not None:
+            used = current
+        if used is not None:
+            percent = _provider_percent(max(0, min(usage, used)) / usage * 100)
+    multipliers = {1: 1440, 3: 60, 5: 1, 6: 10080}
+    unit_int, number_int = unit, number
+    minutes = number_int * multipliers[unit_int] \
+        if number_int > 0 and unit_int in multipliers else None
+    if raw.get("type") == "TIME_LIMIT" and unit_int == 5 and number_int == 1:
+        minutes = 30 * 24 * 60
+    details = raw.get("usageDetails") if isinstance(raw.get("usageDetails"), list) else []
+    return {
+        "raw": raw, "usage": usage, "current": current, "remaining": remaining,
+        "percent": percent, "window_minutes": minutes,
+        "reset": _provider_epoch(raw.get("nextResetTime")), "details": details,
+    }
+
+
+def _zai_limit_detail(limit):
+    parts = []
+    if limit.get("usage") is not None:
+        parts.append(f"{limit['usage']:g} limit")
+    if limit.get("remaining") is not None:
+        parts.append(f"{limit['remaining']:g} remaining")
+    return " · ".join(parts) or None
+
+
+def _normalize_zai_quota(payload, *, region="global", balance=None, updated=None):
+    if not isinstance(payload, dict) or payload.get("success") is not True \
+            or _provider_number(payload.get("code")) != 200:
+        return {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    limits = [_zai_limit(item) for item in data.get("limits", [])]
+    limits = [item for item in limits if item]
+    token_limits = sorted(
+        [item for item in limits if item["raw"].get("type") in {"TOKENS_LIMIT", "CREDIT_LIMIT"}],
+        key=lambda item: item.get("window_minutes") or sys.maxsize)
+    time_limits = [item for item in limits if item["raw"].get("type") == "TIME_LIMIT"]
+    token_limit = token_limits[-1] if token_limits else None
+    session_limit = token_limits[0] if len(token_limits) >= 2 else None
+    time_limit = time_limits[-1] if time_limits else None
+    primary = session_limit or token_limit or time_limit
+    windows = []
+    if primary:
+        windows.append(_provider_window(
+            "zai-primary", "会话额度" if session_limit else "额度", primary["percent"],
+            primary.get("reset"), primary.get("window_minutes"), _zai_limit_detail(primary)))
+    if session_limit and token_limit:
+        windows.append(_provider_window(
+            "zai-secondary", "周期额度", token_limit["percent"], token_limit.get("reset"),
+            token_limit.get("window_minutes"), _zai_limit_detail(token_limit)))
+    if time_limit and (token_limit or session_limit):
+        windows.append(_provider_window(
+            "zai-mcp", "MCP", time_limit["percent"], time_limit.get("reset"),
+            time_limit.get("window_minutes"), _zai_limit_detail(time_limit)))
+
+    details = []
+    if token_limit:
+        label = "Credit quota" if token_limit["raw"].get("type") == "CREDIT_LIMIT" else "Token quota"
+        details.append({"label": label, "value": f"{token_limit['percent']:g}% used",
+                        "secondary": _zai_limit_detail(token_limit)})
+    if session_limit:
+        label = "Session credit quota" if session_limit["raw"].get("type") == "CREDIT_LIMIT" \
+            else "Session token quota"
+        details.append({"label": label, "value": f"{session_limit['percent']:g}% used",
+                        "secondary": _zai_limit_detail(session_limit)})
+    if time_limit:
+        details.append({"label": "MCP quota", "value": f"{time_limit['percent']:g}% used",
+                        "secondary": _zai_limit_detail(time_limit)})
+        for item in time_limit.get("details", [])[:20]:
+            if isinstance(item, dict) and isinstance(item.get("modelCode"), str):
+                value = _provider_number(item.get("usage"))
+                if value is not None and value >= 0:
+                    details.append({"label": item["modelCode"], "value": f"{int(value):,}"})
+
+    if region == "bigmodel-cn" and isinstance(balance, dict) and balance.get("success") is True:
+        balance_data = balance.get("data") if isinstance(balance.get("data"), dict) else {}
+        available = _provider_number(balance_data.get("availableBalance"))
+        current = _provider_number(balance_data.get("balance"))
+        amount = available if available is not None else current
+        if amount is not None:
+            secondary = []
+            for key, label in (("rechargeAmount", "recharged"),
+                               ("giveAmount", "granted"),
+                               ("totalSpendAmount", "spent")):
+                value = _provider_number(balance_data.get(key))
+                if value is not None and (key != "giveAmount" or value > 0):
+                    secondary.append(f"{label} ¥{value:.2f}")
+            row = {"label": "Account balance", "value": f"¥{amount:.2f}"}
+            if secondary:
+                row["secondary"] = " · ".join(secondary)
+            details.append(row)
+
+    plan_name = next((data.get(key).strip() for key in (
+        "planName", "plan", "plan_type", "packageName", "level")
+        if isinstance(data.get(key), str) and data.get(key).strip()), None)
+    return {
+        "available": bool(windows or details or plan_name),
+        "plan": plan_name,
+        "account": None,
+        "windows": windows,
+        "details": details,
+        "source": "zai-api",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_zai_quota():
+    region = (_provider_config_string("Z_AI_REGION", "zai_region") or "global").lower()
+    if region not in {"global", "bigmodel-cn"}:
+        return {}
+    scope = (_provider_config_string("Z_AI_USAGE_SCOPE", "zai_usage_scope") or "personal").lower()
+    if scope not in {"personal", "team"}:
+        return {}
+    api_key = _provider_config_string("Z_AI_API_KEY", "zai_api_key")
+    if not api_key and region == "bigmodel-cn":
+        api_key = _provider_config_string("BIGMODEL_API_KEY", "zai_api_key")
+    organization = _provider_config_string("Z_AI_ORGANIZATION", "zai_organization")
+    project = _provider_config_string("Z_AI_PROJECT", "zai_project")
+    if not api_key or (scope == "team" and (not organization or not project)):
+        return {}
+    base = "https://open.bigmodel.cn" if region == "bigmodel-cn" else "https://api.z.ai"
+    quota_url = _zai_quota_url(base + "/api/monitor/usage/quota/limit", scope)
+    marker = _provider_credential_marker(
+        "zai-usage-v1", api_key, region, scope, organization, project, quota_url)
+    cached = _cached_provider_quota("zai", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if scope == "team":
+        headers["Bigmodel-Organization"] = organization
+        headers["Bigmodel-Project"] = project
+    try:
+        payload = _provider_json_request(quota_url, headers=headers)
+        balance = None
+        if region == "bigmodel-cn":
+            try:
+                balance = _provider_json_request(
+                    "https://www.bigmodel.cn/api/biz/account/query-customer-account-report",
+                    headers=headers, timeout=5)
+            except Exception:
+                pass
+        quota = _normalize_zai_quota(payload, region=region, balance=balance)
+        usage = _provider_usage_from_days({}, limited_coverage="近30天")
+        try:
+            model_payload = _provider_json_request(
+                _zai_model_usage_url(base, scope), headers=headers, timeout=15,
+                max_bytes=8 * 1024 * 1024)
+            usage = _normalize_zai_model_usage(model_payload)
+        except Exception:
+            pass
+        quota["usage"] = usage
+        _save_provider_quota_cache("zai", marker, quota)
+        return quota
+    except Exception:
+        fallback = _cached_provider_quota(
+            "zai", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+        raise
+
+
+def scan_zai_quota():
+    return fetch_zai_quota() if _provider_quota_enabled("zai") else {}
+
+
+# ----- Antigravity loopback quota -----
+
+# 没装/没开 Antigravity 时 ps 全表扫描恒为空,但每 30 秒一个 tick 都要付一次
+# spawn(30ms+)。扫空后在这段时间内不重扫;90 秒也把新启动 Antigravity 的
+# 发现延迟压在两三个 tick 内。
+_ANTIGRAVITY_SCAN_MISS_TTL = 90
+
+
+def _antigravity_extract_flag(command, flag):
+    match = re.search(re.escape(flag) + r"(?:=|\s+)([^\s]+)", command, re.I)
+    return match.group(1) if match else None
+
+
+def _antigravity_process_kind(command):
+    lower = command.lower()
+    language_server = re.search(
+        r"(^|[/\\])language(?:_|-)server(?:[_-][a-z0-9]+)*(?:\.exe)?(?:\s|$)", lower)
+    app_match = ("--app_data_dir" in lower and "antigravity" in lower) or any(
+        marker in lower for marker in ("antigravity.app/", "/gemini.app/",
+                                       "antigravity ide.app/"))
+    if language_server and app_match:
+        return "ide"
+    if re.search(r"(^|[/\\])(antigravity-cli|antigravity_cli|agy)(?:\s|[/\\]|$)", lower):
+        return "cli"
+    return None
+
+
+def _antigravity_process_infos(output):
+    results = []
+    for line in str(output or "").splitlines():
+        match = re.match(r"^\s*(\d+)\s+(.+)$", line)
+        if not match:
+            continue
+        pid, command = int(match.group(1)), match.group(2)
+        kind = _antigravity_process_kind(command)
+        if not kind:
+            continue
+        csrf = _antigravity_extract_flag(command, "--csrf_token")
+        if kind != "cli" and not csrf:
+            continue
+        extension_port = _provider_integer(
+            _antigravity_extract_flag(command, "--extension_server_port"))
+        if extension_port is not None and not 0 < extension_port <= 65535:
+            extension_port = None
+        results.append({
+            "pid": pid, "kind": kind, "csrf_token": csrf or "",
+            "extension_port": extension_port,
+            "extension_csrf_token": _antigravity_extract_flag(
+                command, "--extension_server_csrf_token"),
+        })
+    return results
+
+
+def _antigravity_scan_recently_empty(now_epoch=None):
+    """上一轮 ps 扫空后的 TTL 内直接判定没跑,省掉每 tick 一次 ps 进程。"""
+    root = _load_json(ANTIGRAVITY_SCAN_CACHE, {})
+    empty_at = _provider_number(root.get("empty_at")) if isinstance(root, dict) else None
+    if empty_at is None:
+        return False
+    now = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    return 0 <= now - int(empty_at) < _ANTIGRAVITY_SCAN_MISS_TTL
+
+
+def _record_antigravity_scan(found, now_epoch=None):
+    if found:
+        try:
+            os.remove(ANTIGRAVITY_SCAN_CACHE)
+        except OSError:
+            pass
+        return
+    try:
+        _atomic_write_json(ANTIGRAVITY_SCAN_CACHE, {
+            "empty_at": int(now_epoch if now_epoch is not None else datetime.now().timestamp()),
+        })
+    except OSError:
+        pass
+
+
+def _antigravity_running_processes(now_epoch=None):
+    if _antigravity_scan_recently_empty(now_epoch):
+        return []
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-ax", "-o", "pid=,command="],
+            capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    processes = _antigravity_process_infos(result.stdout)
+    _record_antigravity_scan(bool(processes), now_epoch)
+    return processes
+
+
+def _antigravity_listening_ports(pid):
+    lsof = next((path for path in ("/usr/sbin/lsof", "/usr/bin/lsof")
+                 if os.path.isfile(path) and os.access(path, os.X_OK)), None)
+    if not lsof:
+        return []
+    try:
+        result = subprocess.run(
+            [lsof, "-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return sorted({int(value) for value in re.findall(r":(\d+)\s+\(LISTEN\)", result.stdout)})
+
+
+def _antigravity_endpoints(process):
+    endpoints = []
+    extension_port = process.get("extension_port")
+    if extension_port:
+        for token in (process.get("extension_csrf_token"), process.get("csrf_token")):
+            if token is not None:
+                endpoints.append(("http", extension_port, token, True))
+    for port in _antigravity_listening_ports(process["pid"]):
+        endpoints.append(("https", port, process.get("csrf_token") or "",
+                          process.get("kind") != "cli"))
+    unique = []
+    for endpoint in endpoints:
+        if endpoint not in unique:
+            unique.append(endpoint)
+    return unique
+
+
+def _antigravity_request(endpoint, path, body):
+    scheme, port, csrf, requires_csrf = endpoint
+    headers = {"Connect-Protocol-Version": "1"}
+    if requires_csrf:
+        headers["X-Codeium-Csrf-Token"] = csrf
+    return _provider_json_request(
+        f"{scheme}://127.0.0.1:{port}{path}", headers=headers, method="POST", body=body,
+        timeout=2, allow_insecure_loopback_tls=True)
+
+
+def _antigravity_remaining(value):
+    if not isinstance(value, dict):
+        return None
+    raw = value.get("remainingFraction")
+    if raw is None and value.get("case") == "remainingFraction":
+        raw = value.get("value")
+    number = _provider_number(raw)
+    return max(0.0, min(1.0, number)) if number is not None else None
+
+
+def _normalize_antigravity_quota_summary(payload, updated=None):
+    root = payload.get("response") if isinstance(payload, dict) \
+        and isinstance(payload.get("response"), dict) else payload
+    groups = root.get("groups") if isinstance(root, dict) and isinstance(root.get("groups"), list) else []
+    windows = []
+    for group_index, group in enumerate(groups):
+        if not isinstance(group, dict):
+            continue
+        display = str(group.get("displayName") or f"Group {group_index + 1}")
+        lower_group = display.lower()
+        if "gemini" in lower_group:
+            family, family_order = "Gemini", 0
+        elif "claude" in lower_group or "gpt" in lower_group or "third" in lower_group:
+            family, family_order = "Claude/GPT", 1
+        else:
+            family, family_order = display, 2 + group_index
+        for bucket_index, bucket in enumerate(group.get("buckets") or []):
+            if not isinstance(bucket, dict) or bucket.get("disabled") is True:
+                continue
+            bucket_id = str(bucket.get("bucketId") or f"bucket-{bucket_index}")
+            cadence = (bucket_id + " " + str(bucket.get("displayName") or "")).lower()
+            normalized = cadence.replace("_", "-")
+            if any(marker in normalized for marker in ("5h", "5-hour", "five hour",
+                                                        "five-hour", "session")):
+                cadence_title, minutes, cadence_order = "5h", 300, 0
+            elif any(marker in normalized for marker in ("weekly", "week", "7d")):
+                cadence_title, minutes, cadence_order = "周", 10080, 1
+            else:
+                cadence_title, minutes, cadence_order = str(
+                    bucket.get("displayName") or bucket_id), None, 2
+            remaining = _antigravity_remaining(bucket.get("remaining"))
+            windows.append((family_order, cadence_order, bucket_index, _provider_window(
+                "antigravity-" + bucket_id, f"{family} {cadence_title}",
+                (1 - remaining) * 100 if remaining is not None else None,
+                bucket.get("resetTime"), minutes, bucket.get("description"),
+                usage_known=remaining is not None)))
+    windows.sort(key=lambda item: item[:3])
+    rows = [item[3] for item in windows]
+    return {
+        "available": bool(rows),
+        "plan": None, "account": None, "windows": rows, "details": [],
+        "source": "antigravity-local",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def _normalize_antigravity_user_status(payload, updated=None):
+    if not isinstance(payload, dict):
+        return {}
+    status = payload.get("userStatus") if isinstance(payload.get("userStatus"), dict) else payload
+    config_data = status.get("cascadeModelConfigData") if isinstance(
+        status.get("cascadeModelConfigData"), dict) else {}
+    configs = config_data.get("clientModelConfigs")
+    if not isinstance(configs, list):
+        configs = payload.get("clientModelConfigs") if isinstance(
+            payload.get("clientModelConfigs"), list) else []
+    windows = []
+    for index, config in enumerate(configs):
+        if not isinstance(config, dict) or not isinstance(config.get("quotaInfo"), dict):
+            continue
+        info = config["quotaInfo"]
+        remaining = _provider_number(info.get("remainingFraction"))
+        if remaining is None:
+            continue
+        label = config.get("label")
+        model = config.get("modelOrAlias") if isinstance(config.get("modelOrAlias"), dict) else {}
+        model_id = model.get("model") or f"model-{index}"
+        windows.append(_provider_window(
+            "antigravity-model-" + str(model_id), str(label or model_id),
+            (1 - max(0, min(1, remaining))) * 100, info.get("resetTime")))
+    windows.sort(key=lambda row: (-(row.get("used_pct") or 0), row["title"]))
+    tier = status.get("userTier") if isinstance(status.get("userTier"), dict) else {}
+    plan_status = status.get("planStatus") if isinstance(status.get("planStatus"), dict) else {}
+    plan_info = plan_status.get("planInfo") if isinstance(plan_status.get("planInfo"), dict) else {}
+    plan = next((value.strip() for value in (
+        tier.get("name"), plan_info.get("planName"), plan_info.get("planDisplayName"),
+        plan_info.get("displayName"), plan_info.get("productName"),
+        plan_info.get("planShortName")) if isinstance(value, str) and value.strip()), None)
+    account = status.get("email") if isinstance(status.get("email"), str) else None
+    return {
+        "available": bool(windows), "plan": plan, "account": account,
+        "windows": windows[:12], "details": [], "source": "antigravity-local",
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def fetch_antigravity_quota():
+    paths = {
+        "summary": "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+        "status": "/exa.language_server_pb.LanguageServerService/GetUserStatus",
+        "models": "/exa.language_server_pb.LanguageServerService/GetCommandModelConfigs",
+    }
+    metadata = {"metadata": {
+        "ideName": "antigravity", "extensionName": "antigravity",
+        "ideVersion": "unknown", "locale": "en",
+    }}
+    last_error = None
+    for process in _antigravity_running_processes():
+        endpoints = _antigravity_endpoints(process)
+        if not endpoints:
+            continue
+        marker = _provider_credential_marker(
+            "antigravity", process.get("pid"), process.get("csrf_token"), endpoints)
+        cached = _cached_provider_quota("antigravity", marker, _PROVIDER_QUOTA_TTL)
+        if cached:
+            return cached
+        for endpoint in endpoints:
+            try:
+                summary_payload = _antigravity_request(
+                    endpoint, paths["summary"], {"forceRefresh": True})
+                quota = _normalize_antigravity_quota_summary(summary_payload)
+                if quota.get("available"):
+                    try:
+                        identity_payload = _antigravity_request(endpoint, paths["status"], metadata)
+                        identity = _normalize_antigravity_user_status(identity_payload)
+                        quota["plan"] = identity.get("plan")
+                        quota["account"] = identity.get("account")
+                    except Exception:
+                        pass
+                    _save_provider_quota_cache("antigravity", marker, quota)
+                    return quota
+            except Exception as error:
+                last_error = error
+        for path, body in ((paths["status"], metadata), (paths["models"], metadata)):
+            for endpoint in endpoints:
+                try:
+                    quota = _normalize_antigravity_user_status(
+                        _antigravity_request(endpoint, path, body))
+                    if quota.get("available"):
+                        _save_provider_quota_cache("antigravity", marker, quota)
+                        return quota
+                except Exception as error:
+                    last_error = error
+        fallback = _cached_provider_quota(
+            "antigravity", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True)
+        if fallback:
+            return fallback
+    if last_error:
+        raise last_error
+    return {}
+
+
+def scan_antigravity_quota():
+    return fetch_antigravity_quota() if _provider_quota_enabled("antigravity") else {}
+
+
+def scan_provider_quotas(errors=None):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    all_scans = {
+        "cursor": scan_cursor_quota,
+        "zed": scan_zed_quota,
+        "sub2api": scan_sub2api_quota,
+        "zai": scan_zai_quota,
+        "antigravity": scan_antigravity_quota,
+    }
+    result = {name: {} for name in all_scans}
+    scans = {name: scan for name, scan in all_scans.items()
+             if _provider_quota_enabled(name)}
+    if not scans:
+        return result
+    with ThreadPoolExecutor(max_workers=len(scans), thread_name_prefix="tokei-quota") as pool:
+        futures = {pool.submit(scan): name for name, scan in scans.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                value = future.result()
+                result[name] = value if isinstance(value, dict) else {}
+            except Exception as error:
+                if errors is not None:
+                    errors[f"{name}_quota"] = f"{type(error).__name__}: {error}"
+    return result
+
+
 def scan_grok(bounds, cache=None):
     ledger_touch("grok")
     cache = cache if cache is not None else {"v": _SCAN_CACHE_VERSION}
@@ -3533,6 +5799,7 @@ def scan_grok(bounds, cache=None):
                 bucket[field] += int(entry.get(field, 0) or 0)
 
     usage_days = _grok_usage_days(_load_grok_usage_records(cache), sessions, latest_model)
+    # 会话数只能来自现存日志(被清日志无从归属)
     for day_key, day in usage_days.items():
         try:
             day_date = date.fromisoformat(day_key)
@@ -3543,6 +5810,7 @@ def scan_grok(bounds, cache=None):
             bucket["usage_sessions"].update(day.get("sessions", set()))
             bucket["sessions"].update(day.get("sessions", set()))
 
+    # sessions(set)/projects(含嵌套 set)不进账本,只保留 JSON 兼容字段
     grok_live_days = {
         day_key: {k: v for k, v in day.items() if k not in ("sessions", "projects")}
         for day_key, day in usage_days.items()}
@@ -3673,6 +5941,7 @@ def scan_qoder(bounds, cache):
              "duration": 0, "turns": 0, "ctx_sum": 0.0, "ctx_count": 0}
          for k in RANGE_KEYS}
 
+    # 天级整取整用:sub_chats 计数并入 day dict,连同会话计数一起进账本
     live_days = {}
     for dk, db_day in db_days.items():
         day = dict(db_day)
@@ -3845,6 +6114,7 @@ def scan_qoder_ide(bounds, cache):
         entry = fc["data"]
 
     # 按时间范围聚合（sessions/sub_agents 用 set 去重，避免跨天会话被多算）
+    # 仅 enabled 且正常扫描才会走到这里,disabled 分支在上方早已返回,绝不触碰账本
     B = {k: {"in": 0, "out": 0, "cached": 0, "sessions": 0, "sub_agents": 0,
              "calls": 0, "messages": 0, "duration": 0} for k in RANGE_KEYS}
     session_sets = {k: set() for k in RANGE_KEYS}
@@ -4050,7 +6320,8 @@ def _scan_hermes_db(db_path, _sq):
             cr = int(row.get("cache_read_tokens") or 0)
             cw = int(row.get("cache_write_tokens") or 0)
             reason = int(row.get("reasoning_tokens") or 0)
-            _add_token_usage(day, inp, out, cr, cw, reason, row_cost(row), row.get("model"))
+            _add_token_usage(day, inp, out, cr, cw, reason, row_cost(row),
+                             _model_identity_id(row.get("model")))
             day["hours"][local_dt.hour] += inp + out + cr + cw + reason
             if session_id in sessions:
                 day_sessions.setdefault(dk, set()).add(session_id)
@@ -4203,6 +6474,7 @@ def scan_qodercli(bounds, cache):
         cache["_dirty"] = True
 
     B = _empty_qodercli()["ranges"]
+    # 会话/消息/子agent 维度只能来自现存 transcript;token 类维度走账本
     live_days = {}
     for path, entry in fc.items():
         if path == "_model" or not isinstance(entry, dict):
@@ -4475,13 +6747,14 @@ def scan_openclaw(bounds, cache):
                             if inp == 0 and out == 0:
                                 continue
                             model = msg.get("model", "")
-                            cid = _resolve_id(model)
+                            model_id = _model_identity_id(model)
+                            pricing_id = _exact_pricing_id(model_id)
                             cost_obj = u.get("cost")
                             raw_cost = float((cost_obj or {}).get("total", 0) or 0)
                             if raw_cost > 0:
                                 cost = raw_cost
-                            elif cid:
-                                p = _raw_price(model)
+                            elif pricing_id:
+                                p = _raw_price(pricing_id)
                                 cost = inp / 1e6 * p["in"] + out / 1e6 * p["out"] + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"]
                             else:
                                 cost = 0.0
@@ -4492,7 +6765,7 @@ def scan_openclaw(bounds, cache):
                             day["in"] += inp; day["out"] += out
                             day["cr"] += cr; day["cw"] += cw; day["cost"] += cost
                             day["hours"][dt.hour] += inp + out + cr + cw
-                            mn = cid or model or "unknown"
+                            mn = model_id or model or "unknown"
                             mm = day["models"].setdefault(
                                 mn, {"in": 0, "out": 0, "cr": 0, "cw": 0,
                                      "reason": 0, "cost": 0.0})
@@ -4529,6 +6802,7 @@ def scan_openclaw(bounds, cache):
                     mm["cost"] += mv.get("cost", 0)
                 for hour, amount in enumerate((day.get("hours") or [])[:24]):
                     agg["hours"][hour] += amount
+                # 会话数只能来自现存日志(被清日志无从归属)
                 for k in _day_keys(d):
                     B[k]["sessions"].add(f)
     else:
@@ -4693,6 +6967,7 @@ def scan_pi(bounds, cache):
             except ValueError:
                 continue
             _merge_live_token_day(live_days.setdefault(dk, _empty_token_day()), day)
+            # 会话数只能来自现存日志(被清日志无从归属)
             for k in classify_date(d, bounds):
                 B[k]["sessions"].add(session)
 
@@ -4705,6 +6980,168 @@ def scan_pi(bounds, cache):
             _merge_token_day(B[k], day)
     if changed:
         cache["_dirty"] = True
+    return {"ranges": B}
+
+
+# ---------- Prime Agent ----------
+# JSONL 文件: ~/.prime/agent/sessions/*.jsonl plus session-artifacts/**/**/*.jsonl.
+# Prime Agent uses the Pi Coding Agent Usage shape; child attribution records are bookkeeping only.
+def _prime_agent_session_dirs():
+    explicit = os.environ.get("TOKEI_PRIME_AGENT_SESSION_DIR")
+    if explicit:
+        return _existing_dirs([explicit])
+    agent_dir = os.path.expanduser(os.environ.get(
+        "PRIME_AGENT_CODING_AGENT_DIR", PRIME_AGENT_DIR))
+    session_override = os.environ.get(
+        "PRIME_AGENT_SESSION_DIR", os.environ.get("PRIME_AGENT_CODING_AGENT_SESSION_DIR"))
+    return _existing_dirs([
+        session_override or os.path.join(agent_dir, "sessions"),
+        os.path.join(agent_dir, "session-artifacts"),
+    ])
+
+
+def _parse_prime_session_file(path):
+    days = {}
+    events = []
+    project = None
+    session_id = os.path.basename(path)
+    model = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line_no, line in enumerate(fh, 1):
+                if '"type"' not in line and '"usage"' not in line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if obj.get("type") == "session":
+                    session_id = str(obj.get("id") or session_id)
+                    project = obj.get("cwd") or project
+                    continue
+                if obj.get("type") == "model_change":
+                    model = _pi_model_id({"provider": obj.get("provider"),
+                                           "model": obj.get("modelId")})
+                    continue
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message") or {}
+                if msg.get("role") != "assistant":
+                    continue
+                usage = msg.get("usage") or {}
+                if not usage:
+                    continue
+                dt = parse_ts(obj.get("timestamp") or msg.get("timestamp") or "")
+                if dt is None:
+                    continue
+                current_model = _pi_model_id(msg)
+                current_model = current_model if current_model != "unknown" else model
+                inp = _pi_usage_int(usage, "input")
+                out = _pi_usage_int(usage, "output")
+                cr = _pi_usage_int(usage, "cacheRead", "cache_read")
+                cw = _pi_usage_int(usage, "cacheWrite", "cache_write")
+                reason = _pi_usage_int(usage, "reasoning", "reason", "reasoningTokens")
+                cost = _pi_usage_cost(usage, current_model)
+                if inp + out + cr + cw + reason == 0 and cost <= 0:
+                    continue
+                event_id = obj.get("id") or msg.get("id") or msg.get("responseId")
+                key = f"{session_id}:{event_id}" if event_id else f"{session_id}:{line_no}"
+                events.append({"key": key, "date": dt.astimezone().date().isoformat(),
+                               "hour": dt.astimezone().hour, "in": inp, "out": out,
+                               "cr": cr, "cw": cw, "reason": reason, "cost": cost,
+                               "model": current_model})
+    except OSError:
+        return {"session": session_id, "proj": project, "events": [], "days": {}}
+    for event in events:
+        day = days.setdefault(event["date"], _empty_token_day())
+        _add_token_usage(day, event["in"], event["out"], event["cr"], event["cw"],
+                         event["reason"], event["cost"], event["model"])
+        day["hours"][event["hour"]] += token_total(event)
+    return {"session": session_id, "sid": session_id, "proj": project,
+            "events": events, "days": days}
+
+
+def scan_prime_agent(bounds, cache):
+    ledger_touch("prime_agent")
+    fc = cache.setdefault("prime_agent", {})
+    B = _empty_token_ranges()
+    roots = _prime_agent_session_dirs()
+    seen_files = set()
+    for root in roots:
+        seen_files.update(os.path.realpath(f) for f in glob.glob(
+            os.path.join(root, "**", "*.jsonl"), recursive=True))
+    stale = set(fc.keys()) - seen_files
+    changed = bool(stale)
+    for path in sorted(seen_files):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+        entry = fc.get(path)
+        if not isinstance(entry, dict) or entry.get("sig") != sig:
+            parsed = _parse_prime_session_file(path)
+            parsed["sig"] = sig
+            fc[path] = parsed
+            changed = True
+    for path in stale:
+        fc.pop(path, None)
+    # Prefer one physical copy of a logical session, then dedupe message IDs globally.
+    canonical = {}
+    for path, entry in fc.items():
+        if not isinstance(entry, dict):
+            continue
+        sid = entry.get("sid") or path
+        old = canonical.get(sid)
+        if old is None or len(entry.get("events", [])) > len(old[1].get("events", [])):
+            canonical[sid] = (path, entry)
+    canonical_paths = {path for path, _ in canonical.values()}
+    for path in list(fc):
+        if not path.startswith("_") and path not in canonical_paths:
+            fc.pop(path, None)
+            changed = True
+    used = set()
+    days = {}
+    day_sessions = {}
+    day_projects = {}
+    for path, entry in canonical.values():
+        sid = entry.get("sid") or path
+        proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
+        for event in entry.get("events", []):
+            if event.get("key") in used:
+                continue
+            used.add(event.get("key"))
+            day_key = event.get("date")
+            try:
+                date.fromisoformat(day_key)
+            except (TypeError, ValueError):
+                continue
+            day = days.setdefault(day_key, _empty_token_day())
+            _add_token_usage(day, event.get("in", 0), event.get("out", 0),
+                             event.get("cr", 0), event.get("cw", 0), event.get("reason", 0),
+                             event.get("cost", 0), event.get("model"))
+            hour = event.get("hour")
+            if isinstance(hour, int) and 0 <= hour < 24:
+                day["hours"][hour] += token_total(event)
+            day_sessions.setdefault(day_key, set()).add(sid)
+            if proj_name:
+                day_projects.setdefault(day_key, set()).add(proj_name)
+        B["all"]["sessions"].add(sid)
+    if changed:
+        cache["_dirty"] = True
+    # 会话与项目名随天入账本:日志被清理后,那天的会话数与"在干什么"仍答得出。
+    for day_key, day in days.items():
+        day["sessions"] = sorted(day_sessions.get(day_key, set()))
+        day["projects"] = sorted(day_projects.get(day_key, set()))[:3]
+
+    for day_key, day in ledger_reconcile("prime_agent", days).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except (TypeError, ValueError):
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
     return {"ranges": B}
 
 
@@ -4914,11 +7351,13 @@ def scan_workbuddy(bounds, cache):
                          0, record["cost"], record["model"])
         sessions.setdefault(record["date"], set()).add(record.get("session") or "unknown")
         proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
-        if proj_name and proj_name != "?":
+        if proj_name:
             day_projects.setdefault(record["date"], set()).add(proj_name)
+    # 项目名随天入账本(同 scan_claude):日志被清理后仍能回答"那天在干什么"。
     for day_key, names in day_projects.items():
         days[day_key]["projects"] = sorted(names)[:3]
 
+    # 会话数只能来自现存日志(被清日志无从归属)
     for day_key, day in days.items():
         try:
             day_date = date.fromisoformat(day_key)
@@ -4928,6 +7367,205 @@ def scan_workbuddy(bounds, cache):
             B[range_key]["sessions"].update(sessions.get(day_key, set()))
 
     for day_key, day in ledger_reconcile("workbuddy", days).items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            _merge_token_day(B[range_key], day)
+    return {"ranges": B}
+
+
+# ---------- DeepSeek Harness ----------
+# Harness 会为同一次调用写 usage chunk 和最终 message。按 session/turn/step
+# 只保留最终 message；异常中断时再用 usage chunk 兜底。
+_DEEPSEEK_HARNESS_COST_VERSION = 2
+
+
+def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="deepseek-official"):
+    if not isinstance(item, dict):
+        return None
+    event_type = item.get("type")
+    data = item.get("data") or {}
+    if not isinstance(data, dict):
+        return None
+
+    priority = 0
+    usage = None
+    model = fallback_model
+    provider = fallback_provider
+    if event_type == "assistant/message":
+        usage = data.get("usage")
+        message = data.get("message") or {}
+        source = message.get("source") or {} if isinstance(message, dict) else {}
+        if isinstance(source, dict):
+            model = source.get("model") or model
+            provider = source.get("provider") or provider
+        priority = 2
+    elif event_type == "assistant/chunk":
+        chunk = data.get("chunk") or {}
+        if isinstance(chunk, dict) and chunk.get("type") == "usage":
+            usage = chunk.get("usage")
+            priority = 1
+    if not isinstance(usage, dict):
+        return None
+
+    timestamp = item.get("time")
+    try:
+        dt = datetime.fromtimestamp(int(timestamp) / 1000).astimezone()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+    try:
+        turn = int(data.get("turn"))
+        step = int(data.get("step"))
+    except (TypeError, ValueError):
+        return None
+
+    inp = max(int(usage.get("inputTokens", 0) or 0), 0)
+    raw_out = max(int(usage.get("outputTokens", 0) or 0), 0)
+    cr = max(int(usage.get("cacheReadTokens", 0) or 0), 0)
+    cw = max(int(usage.get("cacheWriteTokens", 0) or 0), 0)
+    reason = min(max(int(usage.get("reasoningTokens", 0) or 0), 0), raw_out)
+    out = raw_out - reason
+    if inp + raw_out + cr + cw <= 0:
+        return None
+    model = str(model or "deepseek-v4-pro")
+    provider = str(provider or "")
+    cost = 0.0
+    price = (_deepseek_official_price(model) if provider == "deepseek-official" else None)
+    if price is None:
+        price_id = _pricing_id(model)
+        price = _raw_price(price_id) if price_id else None
+    if price:
+        cost = (inp / 1e6 * price["in"] + raw_out / 1e6 * price["out"]
+                + cr / 1e6 * price["cache_read"] + cw / 1e6 * price["cache_write"])
+    return {
+        "date": dt.strftime("%Y-%m-%d"), "hour": dt.hour, "ts": int(timestamp),
+        "turn": turn, "step": step, "priority": priority, "model": model,
+        "provider": provider,
+        "in": inp, "out": out, "cr": cr, "cw": cw, "reason": reason,
+        "cost": cost,
+    }
+
+
+def _iter_deepseek_harness_records(file_cache):
+    records = []
+    for path, entry in file_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        session = str(entry.get("sid") or path)
+        for record in entry.get("records", []):
+            if isinstance(record, dict):
+                records.append((record.get("ts", 0), path, entry, session, record))
+    records.sort(key=lambda value: (value[0], value[1]))
+    seen = set()
+    for _, path, entry, session, record in records:
+        key = (session, record.get("turn"), record.get("step"))
+        if key in seen:
+            continue
+        seen.add(key)
+        yield path, entry, record
+
+
+def scan_deepseek_harness(bounds, cache):
+    ledger_touch("deepseek_harness")
+    fc = cache.setdefault("deepseek_harness", {})
+    B = _empty_token_ranges()
+    if not os.path.isdir(DEEPSEEK_HARNESS_DIR):
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+        return {"ranges": B}
+
+    files = set(glob.glob(os.path.join(DEEPSEEK_HARNESS_DIR, "**", "*.jsonl"), recursive=True))
+    stale = set(fc.keys())
+    for path in sorted(files):
+        stale.discard(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig = f"{st.st_mtime_ns}:{st.st_size}"
+        if (isinstance(fc.get(path), dict) and fc[path].get("sig") == sig
+                and fc[path].get("cost_version") == _DEEPSEEK_HARNESS_COST_VERSION):
+            continue
+
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        project = ""
+        current_model = "deepseek-v4-pro"
+        current_provider = "deepseek-official"
+        candidates = {}
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if '"type"' not in line or not any(value in line for value in (
+                            '"session"', '"request/header"',
+                            '"assistant/chunk"', '"assistant/message"')):
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    event_type = item.get("type")
+                    if event_type == "session":
+                        session_id = str(item.get("id") or session_id)
+                        project = item.get("cwd") or project
+                        continue
+                    if event_type == "request/header":
+                        data = item.get("data") or {}
+                        header = data.get("header") or {} if isinstance(data, dict) else {}
+                        config = header.get("config") or {} if isinstance(header, dict) else {}
+                        if isinstance(config, dict):
+                            current_model = config.get("model") or current_model
+                            current_provider = config.get("provider") or current_provider
+                        continue
+                    record = _deepseek_harness_usage_record(
+                        item, current_model, current_provider)
+                    if record is None:
+                        continue
+                    key = (record["turn"], record["step"])
+                    previous = candidates.get(key)
+                    if previous is None or record["priority"] >= previous["priority"]:
+                        candidates[key] = record
+        except OSError:
+            continue
+        records = sorted(candidates.values(), key=lambda record: record["ts"])
+        fc[path] = {"sig": sig, "records": records, "proj": project, "sid": session_id,
+                    "cost_version": _DEEPSEEK_HARNESS_COST_VERSION}
+        cache["_dirty"] = True
+
+    for path in stale:
+        fc.pop(path, None)
+        cache["_dirty"] = True
+
+    days = {}
+    sessions = {}
+    day_projects = {}
+    for _, entry, record in _iter_deepseek_harness_records(fc):
+        day = days.setdefault(record["date"], _empty_token_day())
+        _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
+                         record["reason"], record["cost"], record["model"])
+        day["hours"][record["hour"]] += token_total(record)
+        session = str(entry.get("sid") or "unknown")
+        sessions.setdefault(record["date"], set()).add(session)
+        project = entry.get("proj") or ""
+        project_name = os.path.basename(project.rstrip("/"))
+        if project_name:
+            day_projects.setdefault(record["date"], set()).add(project_name)
+    for day_key, names in day_projects.items():
+        days[day_key]["projects"] = sorted(names)[:3]
+    for day in days.values():
+        day["_cost_version"] = _DEEPSEEK_HARNESS_COST_VERSION
+
+    for day_key, day in days.items():
+        try:
+            day_date = date.fromisoformat(day_key)
+        except ValueError:
+            continue
+        for range_key in classify_date(day_date, bounds):
+            B[range_key]["sessions"].update(sessions.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("deepseek_harness", days).items():
         try:
             day_date = date.fromisoformat(day_key)
         except ValueError:
@@ -5590,6 +8228,7 @@ def scan_qwencode(bounds, cache):
         hour = entry.get("hour")
         if isinstance(hour, int) and 0 <= hour < 24:
             agg["hours"][hour] += token_total(entry)
+        # 会话数只能来自现存日志(被清日志无从归属)
         session = entry.get("session")
         if session is not None:
             for key in classify_date(day, bounds):
@@ -5605,7 +8244,344 @@ def scan_qwencode(bounds, cache):
     return {"ranges": B}
 
 
-# ---------- Kimi Code ----------
+# ---------- Kimi Code CLI ----------
+# protocol 1 使用主 wire 中的 StatusUpdate/SubagentEvent；protocol 1.5 把每个
+# Agent 的 usage.record 独立写入 agents/*/wire.jsonl。两者都只读 session 目录，
+# 不扫描 server/events 镜像，避免重复累计。
+_KIMI_PARSER_VERSION = 3
+
+
+def _kimi_roots():
+    configured = (os.environ.get("TOKEI_KIMI_DIR") or os.environ.get("KIMI_CODE_HOME")
+                  or os.environ.get("KIMI_SHARE_DIR"))
+    if configured:
+        candidates = [configured]
+    elif os.path.normcase(KIMI_CODE_DIR) != os.path.normcase(_KIMI_CODE_DEFAULT_DIR):
+        # Tests and embedders may replace KIMI_CODE_DIR after importing this module.
+        candidates = [KIMI_CODE_DIR]
+    else:
+        candidates = [_KIMI_CODE_DEFAULT_DIR, _KIMI_CODE_LEGACY_DIR]
+    roots = []
+    seen = set()
+    for candidate in candidates:
+        root = os.path.abspath(os.path.expanduser(candidate))
+        key = os.path.normcase(os.path.realpath(root))
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
+    return roots
+
+
+def _kimi_wire_groups():
+    """按会话产出 (agent_wires, root_wire);定深有界遍历,不碰 server/events 等镜像目录。
+
+    protocol 1 只写会话根 wire.jsonl,protocol 1.5 写 agents/<agent>/wire.jsonl。
+    过渡版本可能两者并存,所以两类都要交给上层,由记录级去重决定谁算谁不算。"""
+    groups = []
+    for root in _kimi_roots():
+        sessions_dir = os.path.join(root, "sessions")
+        for session_dir in glob.glob(os.path.join(sessions_dir, "*", "*")):
+            if not os.path.isdir(session_dir):
+                continue
+            agent_wires = sorted(os.path.abspath(path) for path in glob.glob(
+                os.path.join(session_dir, "agents", "*", "wire.jsonl")))
+            root_wire = os.path.join(session_dir, "wire.jsonl")
+            root_wire = os.path.abspath(root_wire) if os.path.isfile(root_wire) else None
+            if agent_wires or root_wire:
+                groups.append((agent_wires, root_wire))
+    return groups
+
+
+def _kimi_wire_files(groups=None):
+    files = set()
+    for agent_wires, root_wire in _kimi_wire_groups() if groups is None else groups:
+        files.update(agent_wires)
+        if root_wire:
+            files.add(root_wire)
+    return sorted(files)
+
+
+def _kimi_mirror_sources(groups):
+    """→ {根 wire: (同会话的 agent wire...)},只含两者并存的会话。"""
+    return {root_wire: tuple(agent_wires)
+            for agent_wires, root_wire in groups
+            if root_wire and agent_wires}
+
+
+def _kimi_group_signature(paths):
+    parts = []
+    for path in paths:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            parts.append(f"{path}:-")
+            continue
+        parts.append(f"{path}:{stat.st_mtime_ns}:{stat.st_size}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _kimi_record_counts(paths):
+    """把这些 wire 里每条记录的去重键计成多重集,用作根 wire 的排除表。"""
+    counts = {}
+    for path in paths:
+        _scan_kimi_wire(path, seen=counts)
+    return counts
+
+
+def _kimi_project_map():
+    result = {}
+    for root in _kimi_roots():
+        metadata = _load_json(os.path.join(root, "kimi.json"), {})
+        for item in metadata.get("work_dirs", []) if isinstance(metadata, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            project = item.get("path")
+            if not isinstance(project, str) or not project:
+                continue
+            digest = hashlib.md5(project.encode("utf-8")).hexdigest()
+            result[digest] = project
+            kaos = item.get("kaos")
+            if isinstance(kaos, str) and kaos:
+                result[f"{kaos}_{digest}"] = project
+    return result
+
+
+def _kimi_wire_context(path, legacy_projects):
+    agent_dir = os.path.dirname(path)
+    agents_dir = os.path.dirname(agent_dir)
+    if os.path.basename(agents_dir) == "agents":
+        session_dir = os.path.dirname(agents_dir)
+        state = _load_json(os.path.join(session_dir, "state.json"), {})
+        if not isinstance(state, dict):
+            state = {}
+        session_id = state.get("id") or os.path.basename(session_dir)
+        project = state.get("cwd")
+        return {
+            "sid": str(session_id),
+            "proj": project if isinstance(project, str) and project else None,
+            "agent": os.path.basename(agent_dir),
+        }
+    session_dir = agent_dir
+    work_dir_hash = os.path.basename(os.path.dirname(session_dir))
+    return {
+        "sid": os.path.basename(session_dir),
+        "proj": legacy_projects.get(work_dir_hash),
+        "agent": "main",
+    }
+
+
+def _kimi_events(message, scope="main"):
+    if not isinstance(message, dict):
+        return
+    msg_type = message.get("type")
+    payload = message.get("payload")
+    if not isinstance(payload, dict):
+        return
+    if msg_type == "SubagentEvent":
+        agent = payload.get("agent_id") or payload.get("parent_tool_call_id") \
+            or payload.get("task_tool_call_id")
+        child_scope = f"{scope}/{agent}" if isinstance(agent, str) and agent else scope
+        yield from _kimi_events(payload.get("event"), child_scope)
+    elif msg_type == "StatusUpdate":
+        yield scope, payload
+
+
+def _kimi_token(value):
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _kimi_datetime(record, key):
+    value = record.get(key) if isinstance(record, dict) else None
+    try:
+        epoch = float(value)
+        if not math.isfinite(epoch):
+            return None
+        if epoch > 100_000_000_000:
+            epoch /= 1000
+        return datetime.fromtimestamp(epoch).astimezone()
+    except (TypeError, ValueError, OverflowError, OSError):
+        parsed = parse_ts(value) if isinstance(value, str) else None
+        return parsed.astimezone() if parsed is not None else None
+
+
+def _scan_kimi_wire(path, exclude=None, seen=None):
+    """exclude:记录键多重集,命中就跳过并抵扣(根 wire 去掉 agent wire 的镜像)。
+    seen:传进来就把本文件的记录键计进去,供上层构造 exclude。
+
+    键只在同一种记录形态内可比:protocol 1.5 的 usage.record 没有 id,只能按
+    时刻+模型+四个 token 值定身份;protocol 1 有 message_id 就用它。跨形态的
+    镜像(根 wire 是 protocol 1、agent wire 是 1.5)认不出来,不在此列。"""
+    days = {}
+    seen_messages = set()
+    # 绝大多数会话没有根 wire 镜像,这时一条记录键都不用建。
+    track = exclude is not None or seen is not None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                if ('"usage.record"' not in line and '"StatusUpdate"' not in line
+                        and '"SubagentEvent"' not in line):
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") == "usage.record":
+                    usage = record.get("usage")
+                    dt = _kimi_datetime(record, "time")
+                    if not isinstance(usage, dict) or dt is None:
+                        continue
+                    inp = _kimi_token(usage.get("inputOther"))
+                    out = _kimi_token(usage.get("output"))
+                    cr = _kimi_token(usage.get("inputCacheRead"))
+                    cw = _kimi_token(usage.get("inputCacheCreation"))
+                    if inp + out + cr + cw == 0:
+                        continue
+                    model = record.get("model")
+                    if not isinstance(model, str) or not model.strip():
+                        model = None
+                    if track:
+                        key = ("u", round(dt.timestamp() * 1000), model, inp, out, cr, cw)
+                        if exclude:
+                            left = exclude.get(key, 0)
+                            if left > 0:
+                                exclude[key] = left - 1
+                                continue
+                        if seen is not None:
+                            seen[key] = seen.get(key, 0) + 1
+                    day = days.setdefault(dt.date().isoformat(), _empty_token_day())
+                    _add_token_usage(day, inp, out, cr, cw, model=model)
+                    day["hours"][dt.hour] += inp + out + cr + cw
+                    continue
+
+                dt = _kimi_datetime(record, "timestamp")
+                if dt is None:
+                    continue
+                message = record.get("message")
+                for scope, payload in _kimi_events(message):
+                    usage = payload.get("token_usage")
+                    if not isinstance(usage, dict):
+                        continue
+                    message_id = payload.get("message_id")
+                    if isinstance(message_id, str) and message_id:
+                        dedup_key = f"{scope}:{message_id}"
+                        if dedup_key in seen_messages:
+                            continue
+                        seen_messages.add(dedup_key)
+                    else:
+                        message_id = None
+                    inp = _kimi_token(usage.get("input_other"))
+                    out = _kimi_token(usage.get("output"))
+                    cr = _kimi_token(usage.get("input_cache_read"))
+                    cw = _kimi_token(usage.get("input_cache_creation"))
+                    if inp + out + cr + cw == 0:
+                        continue
+                    if track:
+                        key = (("m", scope, message_id) if message_id else
+                               ("t", round(dt.timestamp() * 1000), scope, inp, out, cr, cw))
+                        if exclude:
+                            left = exclude.get(key, 0)
+                            if left > 0:
+                                exclude[key] = left - 1
+                                continue
+                        if seen is not None:
+                            seen[key] = seen.get(key, 0) + 1
+                    day = days.setdefault(dt.date().isoformat(), _empty_token_day())
+                    _add_token_usage(day, inp, out, cr, cw)
+                    day["hours"][dt.hour] += inp + out + cr + cw
+    except OSError:
+        return {}
+    return days
+
+
+def scan_kimicode(bounds, cache):
+    ledger_touch("kimicode")
+    fc = cache.setdefault("kimicode", {})
+    B = _empty_token_ranges()
+    groups = _kimi_wire_groups()
+    files = _kimi_wire_files(groups)
+    if not files:
+        if fc:
+            fc.clear()
+            cache["_dirty"] = True
+
+    projects = _kimi_project_map()
+    mirrors = _kimi_mirror_sources(groups)
+    stale = set(fc)
+    changed = False
+    for path in files:
+        stale.discard(path)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        mirror_of = mirrors.get(path)
+        if mirror_of:
+            # 排除表来自 agent wire,它们一变根 wire 就得重算,否则镜像抵扣会错位。
+            signature = f"{signature}:{_kimi_group_signature(mirror_of)}"
+        entry = fc.get(path)
+        context = _kimi_wire_context(path, projects)
+        if (not isinstance(entry, dict) or entry.get("sig") != signature
+                or entry.get("parser_version") != _KIMI_PARSER_VERSION):
+            fc[path] = {
+                "sig": signature,
+                "days": _scan_kimi_wire(
+                    path, exclude=_kimi_record_counts(mirror_of) if mirror_of else None),
+                "sid": context["sid"],
+                "proj": context["proj"],
+                "agent": context["agent"],
+                "parser_version": _KIMI_PARSER_VERSION,
+            }
+            changed = True
+        elif any(entry.get(key) != context[key] for key in ("sid", "proj", "agent")):
+            entry.update(context)
+            changed = True
+
+    for path in stale:
+        fc.pop(path, None)
+        changed = True
+
+    live_days = {}
+    live_sessions = {}
+    live_projects = {}
+    for path, entry in fc.items():
+        if not isinstance(entry, dict):
+            continue
+        for day_key, day in entry.get("days", {}).items():
+            try:
+                date.fromisoformat(day_key)
+            except (TypeError, ValueError):
+                continue
+            _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
+            session = entry.get("sid") or path
+            live_sessions.setdefault(day_key, set()).add(session)
+            project = entry.get("proj")
+            if isinstance(project, str) and project:
+                live_projects.setdefault(day_key, set()).add(project)
+
+    for day_key, day in live_days.items():
+        day["sessions"] = sorted(live_sessions.get(day_key, set()))
+        day["projects"] = sorted(live_projects.get(day_key, set()))
+
+    for day_key, day in ledger_reconcile("kimicode", live_days).items():
+        try:
+            local_day = date.fromisoformat(day_key)
+        except (TypeError, ValueError):
+            continue
+        for range_key in classify_date(local_day, bounds):
+            _merge_token_day(B[range_key], day)
+            B[range_key]["sessions"].update(day.get("sessions", []))
+    if changed:
+        cache["_dirty"] = True
+    return {"ranges": B}
+
+
+# ---------- Kimi 官方额度(复用本地登录态,自动续期 OAuth) ----------
 _KIMI_QUOTA_TTL = 5 * 60
 _KIMI_QUOTA_FALLBACK_TTL = 24 * 3600
 _KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages"
@@ -6038,149 +9014,6 @@ def fetch_kimi_quota(force=False):
         return fallback or {"stale": True, "error": "quota_unavailable"}
 
 
-def _kimi_session_metadata():
-    sessions = {}
-    try:
-        with open(KIMI_SESSION_INDEX, encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
-                try:
-                    record = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(record, dict):
-                    continue
-                session_dir = record.get("sessionDir")
-                if not isinstance(session_dir, str) or not session_dir:
-                    continue
-                sessions[os.path.realpath(session_dir)] = {
-                    "sid": str(record.get("sessionId") or os.path.basename(session_dir)),
-                    "proj": str(record.get("workDir") or ""),
-                }
-    except OSError:
-        pass
-    return sessions
-
-
-def _kimi_session_dir(wire_path):
-    path = Path(wire_path).resolve()
-    for parent in path.parents:
-        if parent.name.startswith("session_"):
-            return str(parent)
-    return ""
-
-
-def _kimi_wire_files():
-    pattern = os.path.join(KIMI_CODE_HOME, "sessions", "**", "session_*",
-                           "agents", "*", "wire.jsonl")
-    return sorted({os.path.realpath(path) for path in glob.glob(pattern, recursive=True)
-                   if os.path.isfile(path)})
-
-
-def _kimi_fallback_project(session_dir):
-    state = _load_json(os.path.join(session_dir, "state.json"), {})
-    return str(state.get("workDir") or "") if isinstance(state, dict) else ""
-
-
-def _kimi_parse_wire(path, sid, proj):
-    days = {}
-    try:
-        with open(path, encoding="utf-8", errors="ignore") as fh:
-            for line in fh:
-                try:
-                    record = json.loads(line)
-                except Exception:
-                    continue
-                if not isinstance(record, dict) or record.get("type") != "usage.record":
-                    continue
-                usage = record.get("usage")
-                if not isinstance(usage, dict):
-                    continue
-                try:
-                    dt = datetime.fromtimestamp(float(record.get("time")) / 1000).astimezone()
-                except (TypeError, ValueError, OSError, OverflowError):
-                    continue
-
-                def amount(key):
-                    try:
-                        return max(int(usage.get(key, 0) or 0), 0)
-                    except (TypeError, ValueError):
-                        return 0
-
-                inp = amount("inputOther")
-                out = amount("output")
-                cr = amount("inputCacheRead")
-                cw = amount("inputCacheCreation")
-                model = str(record.get("model") or "unknown")
-                day = days.setdefault(dt.date().isoformat(), _empty_token_day())
-                _add_token_usage(day, inp, out, cr, cw, model=model)
-                day["hours"][dt.hour] += inp + out + cr + cw
-    except OSError:
-        pass
-    return {"sid": sid, "proj": proj, "days": days}
-
-
-def scan_kimi(bounds, cache):
-    ledger_touch("kimi")
-    fc = cache.setdefault("kimi", {})
-    ranges = _empty_token_ranges()
-    live_days = {}
-    metadata = _kimi_session_metadata()
-    wire_files = _kimi_wire_files()
-    active = set(wire_files)
-
-    for stale in set(fc) - active:
-        del fc[stale]
-        cache["_dirty"] = True
-
-    for path in wire_files:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-        session_dir = _kimi_session_dir(path)
-        meta = metadata.get(os.path.realpath(session_dir), {})
-        sid = str(meta.get("sid") or os.path.basename(session_dir) or path)
-        proj = str(meta.get("proj") or _kimi_fallback_project(session_dir))
-        signature = f"{stat.st_mtime_ns}:{stat.st_size}"
-        entry = fc.get(path)
-        if (not isinstance(entry, dict) or entry.get("sig") != signature
-                or entry.get("sid") != sid or entry.get("proj") != proj):
-            entry = _kimi_parse_wire(path, sid, proj)
-            entry["sig"] = signature
-            fc[path] = entry
-            cache["_dirty"] = True
-
-        for day_key, day in entry.get("days", {}).items():
-            try:
-                local_day = date.fromisoformat(day_key)
-            except (TypeError, ValueError):
-                continue
-            _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
-            for key in classify_date(local_day, bounds):
-                ranges[key]["sessions"].add(sid)
-
-    for day_key, day in live_days.items():
-        names = []
-        for entry in fc.values():
-            if not isinstance(entry, dict):
-                continue
-            if day_key not in (entry.get("days") or {}):
-                continue
-            proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
-            if proj_name and proj_name != "?":
-                names.append(proj_name)
-        if names:
-            day["projects"] = sorted(set(names))[:3]
-
-    for day_key, day in ledger_reconcile("kimi", live_days).items():
-        try:
-            local_day = date.fromisoformat(day_key)
-        except (TypeError, ValueError):
-            continue
-        for key in classify_date(local_day, bounds):
-            _merge_token_day(ranges[key], day)
-    return {"ranges": ranges}
-
 
 def fmt_reset(epoch):
     try:
@@ -6205,10 +9038,17 @@ def _claude_cache_records():
         _path_candidates("TOKEI_CLAUDE_CACHE_DIR", CLAUDE_CACHE, *CLAUDE_CACHE_DIRS))
     records = {}
     for cache_dir in cache_dirs:
+        # realpath 会对路径每一级都 lstat 一遍。这一万个文件共享同一个目录前缀,
+        # 逐个 realpath 等于把同样的目录解析重复一万次,所以前缀只解析一次。
+        real_dir = os.path.realpath(cache_dir)
         for path in glob.glob(os.path.join(cache_dir, "*_0")):
             try:
-                real = os.path.realpath(path)
-                st = os.stat(real)
+                if os.path.islink(path):
+                    real = os.path.realpath(path)
+                    st = os.stat(real)
+                else:
+                    real = os.path.join(real_dir, os.path.basename(path))
+                    st = os.stat(path)
                 records[real] = {
                     "path": real,
                     "mtime_ns": st.st_mtime_ns,
@@ -6459,13 +9299,13 @@ def compute():
     mc = _safe_scan("mimocode", lambda: scan_mimocode(bounds, cache), _empty_mimocode, errors)
     oc = _safe_scan("openclaw", lambda: scan_openclaw(bounds, cache), _empty_openclaw, errors)
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
+    prime = _safe_scan("prime_agent", lambda: scan_prime_agent(bounds, cache), _empty_prime_agent, errors)
     wb = _safe_scan("workbuddy", lambda: scan_workbuddy(bounds, cache), _empty_workbuddy, errors)
+    dsh = _safe_scan("deepseek_harness", lambda: scan_deepseek_harness(bounds, cache),
+                     _empty_deepseek_harness, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
     qwc = _safe_scan("qwencode", lambda: scan_qwencode(bounds, cache), _empty_qwencode, errors)
-    kimi = _safe_scan("kimi", lambda: scan_kimi(bounds, cache), _empty_kimi, errors)
-    force_kimi_quota = "--force-kimi-quota" in sys.argv
-    kimi_quota = _safe_scan(
-        "kimi_quota", lambda: fetch_kimi_quota(force=force_kimi_quota), lambda: None, errors) or {}
+    kimi = _safe_scan("kimicode", lambda: scan_kimicode(bounds, cache), _empty_kimicode, errors)
     _cache_dashboard_days(cache, _GEMINI_DAYS_CACHE_KEY, gm.get("days", {}))
     _cache_dashboard_days(cache, _GROK_DAYS_CACHE_KEY, gk.get("days", {}))
     _save_scan_cache(cache)
@@ -6587,9 +9427,11 @@ def compute():
                 "models": _format_token_models(b["models"])}
 
     piranges = {k: token_usage_range(pi["ranges"][k]) for k in RANGE_KEYS}
+    paranges = {k: token_usage_range(prime["ranges"][k]) for k in RANGE_KEYS}
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
+    dshranges = {k: token_usage_range(dsh["ranges"][k]) for k in RANGE_KEYS}
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
     qwcranges = {k: token_usage_range(qwc["ranges"][k]) for k in RANGE_KEYS}
     kimiranges = {k: token_usage_range(kimi["ranges"][k]) for k in RANGE_KEYS}
@@ -6603,6 +9445,19 @@ def compute():
 
     plan = _safe_scan("claude_plan", scan_claude_plan, lambda: {}, errors) or {}
     grok_quota = _safe_scan("grok_quota", scan_grok_quota, lambda: {}, errors) or {}
+    force_kimi_quota = "--force-kimi-quota" in sys.argv
+    kimi_quota = _safe_scan(
+        "kimi_quota", lambda: fetch_kimi_quota(force=force_kimi_quota), lambda: None, errors) or {}
+    qwenwork_quota = _safe_scan(
+        "qwenwork_quota", scan_qwenwork_quota, lambda: {}, errors) or {}
+    provider_quotas = scan_provider_quotas(errors)
+    _cache_dashboard_days(
+        cache, _CURSOR_PROVIDER_DAYS_CACHE_KEY,
+        ((provider_quotas.get("cursor") or {}).get("usage") or {}).get("days", {}))
+    _cache_dashboard_days(
+        cache, _ZAI_PROVIDER_DAYS_CACHE_KEY,
+        ((provider_quotas.get("zai") or {}).get("usage") or {}).get("days", {}))
+    _save_scan_cache(cache)
     codex_reset_cards = _safe_scan(
         "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
 
@@ -6628,6 +9483,11 @@ def compute():
         "gemini": {
             "ranges": granges,
         },
+        "antigravity": provider_quotas["antigravity"],
+        "cursor": provider_quotas["cursor"],
+        "zed": provider_quotas["zed"],
+        "sub2api": provider_quotas["sub2api"],
+        "zai": provider_quotas["zai"],
         "grok": {
             "ranges": kranges,
             "model": gk["model"],
@@ -6640,6 +9500,7 @@ def compute():
             "q_updated": grok_quota.get("updated"),
             "stale": grok_quota.get("stale"),
         },
+        "qwenwork": qwenwork_quota,
         "qoderwork": {
             "ranges": qwranges,
             "model": qd.get("model"),
@@ -6667,8 +9528,14 @@ def compute():
         "pi": {
             "ranges": piranges,
         },
+        "prime_agent": {
+            "ranges": paranges,
+        },
         "workbuddy": {
             "ranges": wbranges,
+        },
+        "deepseek_harness": {
+            "ranges": dshranges,
         },
         "opencode": {
             "ranges": ocranges,
@@ -6676,7 +9543,7 @@ def compute():
         "qwencode": {
             "ranges": qwcranges,
         },
-        "kimi": {
+        "kimicode": {
             "ranges": kimiranges,
             "weekly": kimi_quota.get("weekly"),
             "limits": kimi_quota.get("limits") or [],
@@ -6695,7 +9562,8 @@ def compute():
 
 def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
-    for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy", "qwencode"):
+    for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
+                     "deepseek_harness", "qwencode"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
             continue
@@ -6707,7 +9575,10 @@ def _recalc_costs(result):
             total_cost = 0.0
             for m in r["models"]:
                 name = m.get("name", "")
-                price_id = _pricing_id(name)
+                model_id = m.get("model_id")
+                price_id = (_exact_pricing_id(model_id) if isinstance(model_id, str) else None)
+                if not price_id:
+                    price_id = _pricing_id(name)
                 authoritative_cost = float(m.get("cost", 0) or 0)
                 if tool_key == "hermes" and authoritative_cost:
                     total_cost += authoritative_cost
@@ -6729,6 +9600,13 @@ def _recalc_costs(result):
                     thoughts = m.get("thoughts", 0)
                     cost = (ti / 1e6 * p["in"] + (to + thoughts) / 1e6 * p["out"]
                             + cached / 1e6 * p["cache_read"])
+                elif tool_key == "deepseek_harness":
+                    cr = m.get("cr", 0)
+                    cw = m.get("cw", 0)
+                    reason = m.get("reason", 0)
+                    p = _deepseek_official_price(name) or p
+                    cost = (ti / 1e6 * p["in"] + (to + reason) / 1e6 * p["out"]
+                            + cr / 1e6 * p["cache_read"] + cw / 1e6 * p["cache_write"])
                 elif tool_key in ("hermes", "zcode", "mimocode"):
                     cr = m.get("cr", 0)
                     cw = m.get("cw", 0)
@@ -6811,6 +9689,15 @@ def _write_sync_snapshot(sync_dir, device_id, payload):
         return False
 
 
+def _sync_safe_usage_payload(payload):
+    snapshot = dict(payload)
+    # Provider quotas are account-local, are not merged by SyncManager, and may
+    # contain an email/login label. Keep them in the local cache only.
+    for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
+        snapshot.pop(key, None)
+    return snapshot
+
+
 def _write_configured_sync_snapshot(d):
     cfg = _load_tokei_config()
     if not cfg:
@@ -6823,25 +9710,23 @@ def _write_configured_sync_snapshot(d):
         return False
 
     import time
-    d["_device"] = device_id
-    d["_ts"] = int(time.time())
-    d["_range_bounds"] = range_boundaries()
+    snapshot = _sync_safe_usage_payload(d)
+    snapshot["_device"] = device_id
+    snapshot["_ts"] = int(time.time())
+    snapshot["_range_bounds"] = range_boundaries()
     cache = _load_scan_cache()
-    d["_dashboard"] = {
+    snapshot["_dashboard"] = {
         "daily": build_daily_costs("all", refresh=False, _cache=cache).get("daily", []),
         "wrapped": {p: build_wrapped(p, refresh=False, _cache=cache)
                     for p in ["all", "1d", "7d", "30d", "365d"]},
     }
-    return _write_sync_snapshot(sync_dir, device_id, d)
+    return _write_sync_snapshot(sync_dir, device_id, snapshot)
 
 
 def main_json():
     d = compute()
     meta = _load_json(PRICING_FILE, {}).get("_meta", {})
     d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
-    ledger = _load_ledger()
-    if ledger.get("tools"):
-        d["_ledger"] = ledger
     print(json.dumps(d, ensure_ascii=False))
     if "--no-sync-snapshot" not in sys.argv:
         _write_configured_sync_snapshot(d)
@@ -6851,9 +9736,11 @@ def write_sync_snapshot():
     d = compute()
     meta = _load_json(PRICING_FILE, {}).get("_meta", {})
     d["_pricing"] = {"updated_at": meta.get("updated_at", ""), "count": meta.get("count", 0)}
+    # 账本随快照进同步仓:异地备份,本地账本丢失时可自愈恢复
     ledger = _load_ledger()
     if ledger.get("tools"):
         d["_ledger"] = ledger
+    # 周期边界推不出来,只有观测到的那台机器知道 —— 不发布,别的机器就永远补不齐历史。
     anchors = _load_quota_anchors()
     if anchors:
         d["_quota_anchors"] = anchors
@@ -6918,10 +9805,10 @@ def main():
     if x["plan"]:
         print(f"plan: {x['plan']} {F}")
     print("---")
-    # Gemini 块
+    # Gemini / Antigravity 块
     g = d["gemini"]
     gt = g["ranges"]["today"]
-    print(f"Gemini CLI {HEAD}")
+    print(f"Gemini / Antigravity {HEAD}")
     print(f"命中率   {gt['hit']:5.1f}% {F}")
     print(f"今日 输入   {human(gt['in']):>6} {F}")
     print(f"今日 输出   {human(gt['out']):>6} {F}")
@@ -6976,6 +9863,18 @@ def main():
         print(f"今日 缓存读 {human(wt['cr']):>6} {F}")
         print(f"今日 ≈成本  ${wt['cost']:.2f} {F}")
         print("---")
+    # DeepSeek Harness 块
+    dt = d["deepseek_harness"]["ranges"]["today"]
+    if dt["sessions"] > 0:
+        print(f"DeepSeek Harness {HEAD}")
+        print(f"命中率   {dt['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(dt['in']):>6} {F}")
+        print(f"今日 输出   {human(dt['out']):>6} {F}")
+        print(f"今日 缓存读 {human(dt['cr']):>6} {F}")
+        if dt.get("reason"):
+            print(f"今日 推理   {human(dt['reason']):>6} {F}")
+        print(f"今日 ≈成本  ${dt['cost']:.2f} {F}")
+        print("---")
     # Qwen Code 块
     qt = d["qwencode"]["ranges"]["today"]
     if qt["sessions"] > 0:
@@ -6987,6 +9886,17 @@ def main():
         if qt.get("reason"):
             print(f"今日 思考   {human(qt['reason']):>6} {F}")
         print(f"今日 ≈成本  ${qt['cost']:.2f} {F}")
+        print("---")
+    # Kimi Code 块（protocol 1.5 提供模型，但 wire 不持久化实际成本）
+    kt = d["kimicode"]["ranges"]["today"]
+    if kt["sessions"] > 0:
+        print(f"Kimi Code {HEAD}")
+        print(f"命中率   {kt['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(kt['in']):>6} {F}")
+        print(f"今日 输出   {human(kt['out']):>6} {F}")
+        print(f"今日 缓存读 {human(kt['cr']):>6} {F}")
+        if kt.get("cw"):
+            print(f"今日 缓存写 {human(kt['cw']):>6} {F}")
         print("---")
     print("刷新 | refresh=true")
 
@@ -7012,9 +9922,14 @@ def update_prices():
         pr = m.get("pricing") or {}
         if not mtok(pr, "prompt") and not mtok(pr, "completion"):
             continue                              # 跳过无价(免费/路由占位)条目
-        models[m["id"]] = {"in": mtok(pr, "prompt"), "out": mtok(pr, "completion"),
-                           "cache_read": mtok(pr, "input_cache_read"),
-                           "cache_write": mtok(pr, "input_cache_write")}
+        entry = {"in": mtok(pr, "prompt"), "out": mtok(pr, "completion"),
+                 "cache_read": mtok(pr, "input_cache_read"),
+                 "cache_write": mtok(pr, "input_cache_write")}
+        for field in ("name", "canonical_slug", "owned_by"):
+            value = m.get(field)
+            if isinstance(value, str) and value.strip():
+                entry[field] = value.strip()
+        models[m["id"]] = entry
     payload = {"_meta": {"source": "openrouter/api/v1/models",
                          "updated_at": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S%z"),
                          "count": len(models)},
@@ -7244,7 +10159,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     cache = _cache if _cache is not None else _load_scan_cache()
     days = {}
     models = {}
-    live_tool_tokens = {}
+    live_tool_tokens = {}   # {day: {ledger工具名: 实时token}},供账本逐工具高水位合并
 
     def _add_day_tokens(d, dk, tool, amount):
         d["tokens"] += amount
@@ -7253,12 +10168,16 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
-                       "workbuddy": 0.0, "opencode": 0.0, "qwencode": 0.0, "kimi": 0.0,
+                       "workbuddy": 0.0, "deepseek_harness": 0.0,
+                       "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
+                       "prime_agent": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
                        "c_in": 0, "c_out": 0, "c_cr": 0, "c_cw": 0,
                        "x_in": 0, "x_out": 0, "x_cached": 0, "x_reason": 0,
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
+                        "pa_in": 0, "pa_out": 0, "pa_cr": 0, "pa_cw": 0, "pa_reason": 0,
                        "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
+                       "d_in": 0, "d_out": 0, "d_cr": 0, "d_cw": 0, "d_reason": 0,
                        "q_in": 0, "q_out": 0, "q_cr": 0, "q_reason": 0,
                        "g_in": 0, "g_out": 0, "g_cr": 0, "g_reason": 0,
                        "tokens": 0, "sessions": 0}
@@ -7317,6 +10236,27 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             model["out"] += int(usage.get("out", 0) or 0)
             model["cr"] += cached
             model["reason"] += int(usage.get("thoughts", 0) or 0)
+
+    for fp, entry in cache.get("prime_agent", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            d = days.setdefault(dk, _empty())
+            d["prime_agent"] += day.get("cost", 0)
+            d["pa_in"] += day.get("in", 0); d["pa_out"] += day.get("out", 0)
+            d["pa_cr"] += day.get("cr", 0); d["pa_cw"] += day.get("cw", 0)
+            d["pa_reason"] += day.get("reason", 0)
+            d["tokens"] += token_total(day)
+            for model_name, usage in day.get("models", {}).items():
+                name = f"{nice_model(model_name)} (Prime Agent)"
+                model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
+                                                 "cr": 0, "cw": 0, "reason": 0,
+                                                 "tool": "prime_agent"})
+                model["cost"] += usage.get("cost", 0)
+                for key in TOKEN_FIELDS:
+                    model[key] += usage.get(key, 0)
 
     for dk, day in cache.get(_GROK_DAYS_CACHE_KEY, {}).items():
         if cutoff and dk < cutoff:
@@ -7397,6 +10337,24 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
         for key in TOKEN_FIELDS:
             m[key] += record.get(key, 0)
 
+    for _, _, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
+        dk = record.get("date")
+        if not dk or (cutoff and dk < cutoff):
+            continue
+        d = days.setdefault(dk, _empty())
+        d["deepseek_harness"] += record.get("cost", 0)
+        d["d_in"] += record.get("in", 0); d["d_out"] += record.get("out", 0)
+        d["d_cr"] += record.get("cr", 0); d["d_cw"] += record.get("cw", 0)
+        d["d_reason"] += record.get("reason", 0)
+        _add_day_tokens(d, dk, "deepseek_harness", token_total(record))
+        name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
+        model = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0,
+                                         "cr": 0, "cw": 0, "reason": 0,
+                                         "tool": "deepseek_harness"})
+        model["cost"] += record.get("cost", 0)
+        for key in TOKEN_FIELDS:
+            model[key] += record.get(key, 0)
+
     qwencode_entries = cache.get("qwencode", {}).get("entries", [])
     for entry in qwencode_entries:
         dk = entry.get("date")
@@ -7416,20 +10374,21 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             for key in TOKEN_FIELDS:
                 m[key] += mv.get(key, 0)
 
-    for dk, day_data in _iter_cached_token_days(cache.get("kimi", {})):
-        if cutoff and dk < cutoff:
+    for _, entry in cache.get("kimicode", {}).items():
+        if not isinstance(entry, dict):
             continue
-        d = days.setdefault(dk, _empty())
-        d["kimi"] += day_data.get("cost", 0)
-        _add_day_tokens(d, dk, "kimi", token_total(day_data))
-        for mn, mv in day_data.get("models", {}).items():
-            name = f"{nice_model(mn)} (Kimi Code)"
-            model = models.setdefault(
-                name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
-                       "reason": 0, "tool": "kimi"})
-            model["cost"] += mv.get("cost", 0)
-            for key in TOKEN_FIELDS:
-                model[key] += mv.get(key, 0)
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            d = days.setdefault(dk, _empty())
+            _add_day_tokens(d, dk, "kimicode", token_total(day))
+            for mn, mv in day.get("models", {}).items():
+                name = f"{nice_model(mn)} (Kimi Code)"
+                model = models.setdefault(
+                    name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0, "cw": 0,
+                           "reason": 0, "tool": "kimicode"})
+                for key in TOKEN_FIELDS:
+                    model[key] += mv.get(key, 0)
 
     for fp, entry in cache.get("hermes", {}).items():
         for dk, day in entry.get("days", {}).items():
@@ -7498,9 +10457,12 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
             m["cr"] += cached
 
     # --- 持久账本高水位合并:逐工具逐日取 max,被清理的历史天由账本兜底补进序列 ---
+    # 同一份数据的存档与实时绝不相加:cost 直接与该工具当日成本列取 max;
+    # tokens 列只补"账本白名单token(_ledger_token_sum) 超出该工具当日实时token"的差额。
+    # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "pi", "workbuddy", "opencode", "qwencode", "kimi"))
+        "mimocode", "pi", "workbuddy", "deepseek_harness", "opencode", "qwencode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
             continue
@@ -7532,19 +10494,27 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                                       "reason": codex_reason, "tool": "codex"}
 
     daily = [{"date": dk, "claude": round(v["claude"], 2), "codex": round(v["codex"], 2),
-              "gemini": round(v["gemini"], 2), "hermes": round(v["hermes"], 2),
-              "openclaw": round(v["openclaw"], 2), "grok": round(v["grok"], 2),
+              "gemini": round(v["gemini"], 2), "grok": round(v["grok"], 2),
+              "hermes": round(v["hermes"], 2),
+              "openclaw": round(v["openclaw"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
-              "workbuddy": round(v["workbuddy"], 2), "qwencode": round(v["qwencode"], 2),
-              "kimi": round(v["kimi"], 2),
+              "workbuddy": round(v["workbuddy"], 2),
+              "deepseek_harness": round(v["deepseek_harness"], 2),
+              "qwencode": round(v["qwencode"], 2),
+              "kimicode": round(v["kimicode"], 2),
+              "prime_agent": round(v["prime_agent"], 2),
               "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
                              + v["mimocode"] + v["pi"] + v["workbuddy"]
-                             + v["opencode"] + v["qwencode"] + v["hermes"]
-                             + v["openclaw"] + v["kimi"], 2),
+                             + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
+                             + v["kimicode"] + v["prime_agent"] + v["hermes"]
+                             + v["openclaw"], 2),
               "c_in": v["c_in"], "c_out": v["c_out"], "c_cr": v["c_cr"], "c_cw": v["c_cw"],
               "x_in": v["x_in"], "x_out": v["x_out"], "x_cached": v["x_cached"], "x_reason": v["x_reason"],
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
+               "pa_in": v["pa_in"], "pa_out": v["pa_out"], "pa_cr": v["pa_cr"], "pa_cw": v["pa_cw"], "pa_reason": v["pa_reason"],
               "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
+              "d_in": v["d_in"], "d_out": v["d_out"], "d_cr": v["d_cr"],
+              "d_cw": v["d_cw"], "d_reason": v["d_reason"],
               "q_in": v["q_in"], "q_out": v["q_out"], "q_cr": v["q_cr"], "q_reason": v["q_reason"],
               "g_in": v["g_in"], "g_out": v["g_out"], "g_cr": v["g_cr"], "g_reason": v["g_reason"],
               "tokens": v["tokens"]}
@@ -7568,7 +10538,45 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                            "reason": v.get("reason", 0), "tokens": total_tok, "tool": v["tool"],
                            "cost_per_k": cost_per_k, "out_ratio": out_ratio})
 
-    return {"daily": daily, "models": model_list}
+    provider_models = {}
+    for cache_key, tool, suffix in (
+            (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
+            (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号")):
+        for day_key, day in (cache.get(cache_key) or {}).items():
+            if cutoff and day_key < cutoff or not isinstance(day, dict):
+                continue
+            for raw_name, raw_usage in (day.get("models") or {}).items():
+                if not isinstance(raw_usage, dict):
+                    continue
+                name = f"{nice_model(raw_name)} ({suffix})"
+                model = provider_models.setdefault(
+                    name,
+                    {"name": name, "cost": 0.0, "in": 0, "out": 0,
+                     "cr": 0, "cw": 0, "reason": 0, "tokens": 0,
+                     "tool": tool})
+                components = {field: _provider_usage_int(raw_usage.get(field))
+                              for field in _PROVIDER_USAGE_FIELDS}
+                model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
+                    or sum(components.values())
+                for field, value in components.items():
+                    model[field] += value
+                cost = _provider_number(raw_usage.get("cost")) or 0.0
+                if cost >= 0:
+                    model["cost"] += cost
+
+    provider_model_list = []
+    for model in sorted(
+            provider_models.values(), key=lambda item: (-item["tokens"], item["name"])):
+        out_k = model["out"] / 1000 if model["out"] else 0
+        provider_model_list.append({
+            **model,
+            "cost": round(model["cost"], 2),
+            "cost_per_k": round(model["cost"] / out_k, 3) if out_k > 0 else 0,
+            "out_ratio": round(model["out"] / model["tokens"] * 100, 1)
+            if model["tokens"] > 0 else 0,
+        })
+
+    return {"daily": daily, "models": model_list, "provider_models": provider_model_list}
 
 
 def daily_costs():
@@ -7608,11 +10616,11 @@ def build_wrapped(period="all", refresh=True, _cache=None):
     hours = [0] * 24
     weekday = [0] * 7
     day_tokens = {}
+    day_cost = {}
     proj_tok = {}
     day_projs = {}
     model_tok = {}
     all_day_hours = set()
-    day_cost = {}
 
     def add_hours(day_key, values):
         if not isinstance(values, list) or len(values) != 24:
@@ -7647,14 +10655,14 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 nm = nice_model(mn)
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
-    # --- Codex (in + out; in 已含 cached, out 已含 reason) ---
+    # --- Codex (in + out + reason; in 已含 cached。与账本白名单/主页卡片总量同口径) ---
     for f, entry in cache.get("codex", {}).items():
         if not isinstance(entry, dict):
             continue
         for dk, day in entry.get("days", {}).items():
             if cutoff and dk < cutoff:
                 continue
-            tok = day.get("in", 0) + day.get("out", 0)
+            tok = day.get("in", 0) + day.get("out", 0) + day.get("reason", 0)
             day_tokens[dk] = day_tokens.get(dk, 0) + tok
             day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
             weekday[date.fromisoformat(dk).weekday()] += tok
@@ -7778,8 +10786,8 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             nm = f"{nice_model(mn)} (Qwen Code)"
             model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
-    # --- Kimi Code (in + out + cache read + cache creation) ---
-    for entry in cache.get("kimi", {}).values():
+    # --- Kimi Code (legacy StatusUpdate and protocol 1.5 usage.record) ---
+    for _, entry in cache.get("kimicode", {}).items():
         if not isinstance(entry, dict):
             continue
         project_path = entry.get("proj") or ""
@@ -7794,9 +10802,9 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             pt = proj_tok.setdefault(project, [0, 0.0])
             pt[0] += tok
             day_projs.setdefault(dk, set()).add(project)
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Kimi Code)"
-                model_tok[name] = model_tok.get(name, 0) + token_total(usage)
+            for mn, mv in day.get("models", {}).items():
+                model_name = f"{nice_model(mn)} (Kimi Code)"
+                model_tok[model_name] = model_tok.get(model_name, 0) + token_total(mv)
 
     # --- Pi Coding Agent (in + out + cr + cw + reason) ---
     for f, entry in cache.get("pi", {}).items():
@@ -7812,6 +10820,22 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             add_hours(dk, day.get("hours"))
             for mn, mv in day.get("models", {}).items():
                 nm = f"{nice_model(mn)} (Pi)"
+                model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
+
+    # --- Prime Agent (Pi-compatible persisted assistant usage) ---
+    for f, entry in cache.get("prime_agent", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        for dk, day in entry.get("days", {}).items():
+            if cutoff and dk < cutoff:
+                continue
+            tok = token_total(day)
+            day_tokens[dk] = day_tokens.get(dk, 0) + tok
+            day_cost[dk] = day_cost.get(dk, 0.0) + day.get("cost", 0)
+            weekday[date.fromisoformat(dk).weekday()] += tok
+            add_hours(dk, day.get("hours"))
+            for mn, mv in day.get("models", {}).items():
+                nm = f"{nice_model(mn)} (Prime Agent)"
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
     # --- WorkBuddy (逐次调用，output 已含 reasoning) ---
@@ -7833,6 +10857,27 @@ def build_wrapped(period="all", refresh=True, _cache=None):
         pt[0] += tok; pt[1] += record.get("cost", 0)
         day_projs.setdefault(dk, set()).add(project)
         model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
+        model_tok[model_name] = model_tok.get(model_name, 0) + tok
+
+    # --- DeepSeek Harness (最终 message 优先，异常中断用 usage chunk) ---
+    for _, entry, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
+        dk = record.get("date", "")
+        if not dk or (cutoff and dk < cutoff):
+            continue
+        tok = token_total(record)
+        day_tokens[dk] = day_tokens.get(dk, 0) + tok
+        day_cost[dk] = day_cost.get(dk, 0.0) + record.get("cost", 0)
+        weekday[date.fromisoformat(dk).weekday()] += tok
+        hour = record.get("hour")
+        if isinstance(hour, int) and 0 <= hour < 24:
+            hours[hour] += tok
+            all_day_hours.add(f"{dk}:{hour}")
+        project_path = entry.get("proj") or ""
+        project = os.path.basename(project_path.rstrip("/")) or "DeepSeek Harness"
+        pt = proj_tok.setdefault(project, [0, 0.0])
+        pt[0] += tok; pt[1] += record.get("cost", 0)
+        day_projs.setdefault(dk, set()).add(project)
+        model_name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
         model_tok[model_name] = model_tok.get(model_name, 0) + tok
 
     # --- QoderWork (in + out, no cost) ---
@@ -7865,6 +10910,11 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             nm = f"{nice_model(model_name)} (Qoder)"
             model_tok[nm] = model_tok.get(nm, 0) + tok
 
+    # --- 持久账本合并:全部指标统一账本口径 ---
+    # 账本是同一份数据的高水位存档:同一天取 max(账本合计, 实时值),绝不相加以免重复计数
+    # (天级整取整用;账本理论上 ≥ 实时,max 只是保险)。token 按白名单口径求和(含 cached/thoughts,
+    # 见 _ledger_token_sum),cost 同理逐日取 max。被清理日志的历史天由账本兜底补回,
+    # 让 total/active/streak/busiest/peak 与 peak_days 同口径,避免同页口径分裂。
     ledger_day_tokens = {}
     ledger_day_cost = {}
     for tool_days in _load_ledger().get("tools", {}).values():
@@ -7882,7 +10932,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
             if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
                 ledger_day_cost[dk] = ledger_day_cost.get(dk, 0.0) + float(cost)
             projects = day.get("projects")
-            if isinstance(projects, list):
+            if isinstance(projects, list):  # 账本存档的项目名:日志被清后"那天在干什么"的记忆
                 names = {p for p in projects if isinstance(p, str) and p}
                 if names:
                     day_projs.setdefault(dk, set()).update(names)
@@ -7895,15 +10945,18 @@ def build_wrapped(period="all", refresh=True, _cache=None):
 
     active = sorted(day_tokens.keys())
     streak_max, streak_cur = _streak_info(active)
+
+    # --- 巅峰日 Top 3:直接取合并后的 day_tokens,与 total_tokens/active_days 同一份数据 ---
     peak_days = [
         {"date": dk, "tokens": tok,
-         "projects": sorted(day_projs.get(dk) or ())[:3]}
+         "projects": sorted(day_projs.get(dk) or ())[:3]}  # 账本天的项目名同样能命中
         for dk, tok in sorted(day_tokens.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
         if tok > 0
     ]
+    # busiest 向后兼容保留,取值 = peak_days[0],保证两者一致;成就计算同样用合并后的冠军值。
     busiest_merged = ({"date": peak_days[0]["date"], "tokens": peak_days[0]["tokens"]}
                       if peak_days else {"date": "", "tokens": 0})
-    busiest_dk, busiest_tok = busiest_merged["date"], busiest_merged["tokens"]
+    busiest_tok = busiest_merged["tokens"]
     top_model_name, top_model_tok = (max(model_tok.items(), key=lambda kv: kv[1])
                                      if model_tok else ("-", 0))
     projects = sorted(
@@ -8004,7 +11057,7 @@ def build_wrapped(period="all", refresh=True, _cache=None):
         "active_days": len(active),
         "streak_max": streak_max,
         "streak_cur": streak_cur,
-        "busiest": {"date": busiest_dk, "tokens": busiest_tok},
+        "busiest": busiest_merged,
         "peak_days": peak_days,
         "day_projects": {dk: sorted(projs)[:3] for dk, projs in day_projs.items() if projs},
         "top_model": {"name": top_model_name, "tokens": top_model_tok},
@@ -8034,221 +11087,8 @@ def _load_dashboard_cache():
     return cache
 
 
-def build_dashboard(period="all"):
-    cache = _load_dashboard_cache()
-    result = build_daily_costs(period, refresh=False, _cache=cache)
-    result["wrapped"] = build_wrapped(period, refresh=False, _cache=cache)
-    return result
-
-
-def dashboard():
-    print(json.dumps(build_dashboard(_arg_period()), ensure_ascii=False))
-
-
-def projects():
-    """项目足迹:从缓存聚合所有项目路径、活跃时间、session 数、token、成本。"""
-    compute()
-    cache = _load_scan_cache()
-
-    proj_map = {}  # path → {sessions, tokens, cost, last_active, model_tok}
-
-    # Claude sessions
-    for f, entry in cache.get("claude", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("claude")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = nice_model(mn)
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
-
-    # Pi sessions
-    for f, entry in cache.get("pi", {}).items():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["sessions"] += 1
-        p["tools"].add("pi")
-        for dk, day in entry.get("days", {}).items():
-            tok = token_total(day)
-            p["tokens"] += tok
-            p["cost"] += day.get("cost", 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for mn, mv in day.get("models", {}).items():
-                nm = f"{nice_model(mn)} (Pi)"
-                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
-
-    # WorkBuddy sessions
-    workbuddy_sessions = {}
-    for _, entry, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("workbuddy")
-        p["tokens"] += token_total(record)
-        p["cost"] += record.get("cost", 0)
-        dk = record.get("date", "")
-        if dk > p["last_active"]:
-            p["last_active"] = dk
-        model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
-        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
-        workbuddy_sessions.setdefault(proj_path, set()).add(record.get("session") or entry.get("sid"))
-    for proj_path, session_ids in workbuddy_sessions.items():
-        proj_map[proj_path]["sessions"] += len(session_ids)
-
-    # Kimi Code sessions（同一 session 的多个 agent 日志只计一个会话）
-    kimi_project_sessions = {}
-    for entry in cache.get("kimi", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("kimi")
-        kimi_project_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
-        for dk, day in entry.get("days", {}).items():
-            p["tokens"] += token_total(day)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            for model, usage in day.get("models", {}).items():
-                name = f"{nice_model(model)} (Kimi Code)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
-    for proj_path, session_ids in kimi_project_sessions.items():
-        proj_map[proj_path]["sessions"] += len({sid for sid in session_ids if sid})
-
-    # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。
-    grok_project_sessions = {}
-    for entry in cache.get("grok", {}).values():
-        if not isinstance(entry, dict):
-            continue
-        grok_path = entry.get("project") or ""
-        if not grok_path:
-            continue
-        p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("grok")
-        grok_project_sessions.setdefault(grok_path, set()).add(entry.get("sid"))
-        dk = entry.get("date") or ""
-        if dk > p["last_active"]:
-            p["last_active"] = dk
-    for dk, day in cache.get(_GROK_DAYS_CACHE_KEY, {}).items():
-        for grok_path, usage in day.get("projects", {}).items():
-            p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                                 "last_active": "", "model_tok": {}, "tools": set()})
-            p["tools"].add("grok")
-            p["tokens"] += int(usage.get("tokens", 0) or 0)
-            p["cost"] += float(usage.get("cost", 0) or 0)
-            if dk > p["last_active"]:
-                p["last_active"] = dk
-            session_ids = {sid for sid in usage.get("sessions", []) if sid}
-            grok_project_sessions.setdefault(grok_path, set()).update(session_ids)
-            for model, amount in usage.get("models", {}).items():
-                name = f"{nice_model(model)} (Grok Build)"
-                p["model_tok"][name] = p["model_tok"].get(name, 0) + int(amount or 0)
-    for grok_path, session_ids in grok_project_sessions.items():
-        proj_map[grok_path]["sessions"] += len({sid for sid in session_ids if sid})
-
-    # 检测本地 LISTEN 端口,匹配项目 cwd
-    port_map = _detect_local_servers(set(proj_map.keys()))
-
-    result = []
-    for path, info in proj_map.items():
-        name = os.path.basename(path.rstrip("/")) or path
-        top_model = max(info["model_tok"].items(), key=lambda kv: kv[1])[0] if info["model_tok"] else ""
-        entry = {
-            "path": path,
-            "name": name,
-            "last_active": info["last_active"],
-            "sessions": info["sessions"],
-            "tokens": info["tokens"],
-            "cost": round(info["cost"], 2),
-            "top_model": top_model,
-            "tools": sorted(info["tools"]),
-        }
-        if path in port_map:
-            entry["ports"] = sorted(port_map[path])
-        result.append(entry)
-    result.sort(key=lambda x: x["last_active"], reverse=True)
-    print(json.dumps(result, ensure_ascii=False))
-
-
-def _detect_local_servers(project_paths):
-    """检测哪些项目目录下有进程正在监听 TCP 端口。返回 {path: [port, ...]}。"""
-    import subprocess
-    try:
-        # 1) pid → ports (LISTEN)
-        out1 = subprocess.check_output(
-            ["lsof", "-iTCP", "-sTCP:LISTEN", "-P", "-n", "-F", "pn"],
-            stderr=subprocess.DEVNULL, timeout=10, text=True)
-        pid_ports = {}
-        cur_pid = None
-        for line in out1.strip().split("\n"):
-            if line.startswith("p"):
-                cur_pid = line[1:]
-            elif line.startswith("n") and cur_pid:
-                addr = line[1:]
-                port = addr.rsplit(":", 1)[-1] if ":" in addr else None
-                if port and port.isdigit():
-                    p = int(port)
-                    if 1024 <= p <= 65535:
-                        pid_ports.setdefault(cur_pid, set()).add(p)
-
-        if not pid_ports:
-            return {}
-
-        # 2) pid → cwd (只查有监听端口的 pid，避免全系统扫描超时)
-        pid_arg = ",".join(pid_ports.keys())
-        out2 = subprocess.check_output(
-            ["lsof", "-a", "-d", "cwd", "-p", pid_arg, "-F", "pn"],
-            stderr=subprocess.DEVNULL, timeout=10, text=True)
-        pid_cwd = {}
-        cur_pid = None
-        for line in out2.strip().split("\n"):
-            if line.startswith("p"):
-                cur_pid = line[1:]
-            elif line.startswith("n") and cur_pid:
-                pid_cwd[cur_pid] = line[1:]
-
-        # 3) 交叉匹配: 进程 cwd 是项目路径或其子目录
-        #    匹配最深(最长)的项目路径，避免 home 目录吃掉所有端口
-        home = os.path.expanduser("~")
-        sorted_projs = sorted(project_paths, key=len, reverse=True)
-        result = {}
-        for pid, ports in pid_ports.items():
-            cwd = pid_cwd.get(pid, "")
-            if not cwd or cwd == home:
-                continue
-            for proj in sorted_projs:
-                if proj == home:
-                    continue
-                if cwd == proj or cwd.startswith(proj + "/"):
-                    result.setdefault(proj, set()).update(ports)
-                    break
-        return result
-    except Exception:
-        return {}
-
-
+# ---------- 周额度消耗 ----------
+# 一个周期 = 两次「余量 100%」之间,起点取 resets_at - 7天。
 # 实测:resets_at 会不定期重锚(观测到的间隔有 0.75 / 2.1 / 7.0 天),所以历史边界
 # 推不出来,只能观测一次记一次 —— 见 _QUOTA_ANCHOR_FILE。
 # 周期边界落在半天,日级账本切不出来,所以整日部分取账本(权威,不受 CLI 清理旧日志
@@ -8256,11 +11096,12 @@ def _detect_local_servers(project_paths):
 _QUOTA_CYCLE_HISTORY = 8
 _QUOTA_WEEK_HOURS = 7 * 24
 _QUOTA_SELF_DEVICE = "本机"
-_QUOTA_ANCHOR_FILE = os.path.join(_USER_DIR, "quota_cycles.json")
+_QUOTA_ANCHOR_FILE = os.path.join(HOME, ".tokei", "quota_cycles.json")
 # resets_in_seconds 是整秒截断的,同一个锚点读出来会有几秒抖动。
 _QUOTA_ANCHOR_JITTER = 120
+_QUOTA_CYCLE_MIN_USED_PCT = 2
 # 有周额度窗口的三个工具 → 日表里的短键。
-_QUOTA_TOOLS = (("claude", "c"), ("codex", "x"), ("grok", "g"), ("kimi", "k"))
+_QUOTA_TOOLS = (("claude", "c"), ("codex", "x"), ("grok", "g"))
 
 
 def _quota_local_day_range(day_key):
@@ -8319,15 +11160,13 @@ def _quota_day_tokens(tool, entry):
         # 账本里的 codex "in" 已含 cached(与 ranges 相反,那边 in 是未缓存部分),
         # 再加 cached 会翻倍。
         return sum(int(entry.get(k, 0) or 0) for k in ("in", "out"))
-    if tool == "kimi":
-        return sum(int(entry.get(k, 0) or 0) for k in ("in", "out", "cr", "cw"))
     if entry.get("tokens") is not None:
         return int(entry["tokens"] or 0)
     return sum(int(entry.get(k, 0) or 0) for k in ("in", "out", "cr", "reason"))
 
 
 def _quota_daily_from_tools(tools):
-    """账本日表 → {日: {"c": …, "x": …, "g": …, "k": …}}。"""
+    """账本日表 → {日: {"c": …, "x": …, "g": …}}。"""
     out = {}
     for tool, key in _QUOTA_TOOLS:
         for day, entry in (tools.get(tool) or {}).items():
@@ -8475,16 +11314,6 @@ def _quota_tool_reading(source, tool):
         if data.get("pw_stale"):
             return None
         used, reset, updated = data.get("pw"), data.get("rw"), data.get("q_updated")
-    elif tool == "kimi":
-        if data.get("q_stale"):
-            return None
-        weekly = data.get("weekly") or {}
-        used_amt, limit = weekly.get("used"), weekly.get("limit")
-        if isinstance(used_amt, (int, float)) and isinstance(limit, (int, float)) and limit > 0:
-            used = min(100.0, max(0.0, float(used_amt) / float(limit) * 100.0))
-        else:
-            used = None
-        reset, updated = weekly.get("reset_at"), data.get("q_updated")
     else:
         # Grok 也可能是月套餐,月窗口长度不定又没有数据可验证,先只认周。
         if data.get("stale") or data.get("window") != "week":
@@ -8524,17 +11353,42 @@ def _save_quota_anchors(anchors):
                 pass
 
 
-def _record_quota_anchor(anchors, tool, reset, used, now):
-    """记下一次额度读数。同一个锚点只留一条,used 取见过的最大值。"""
+def _record_quota_anchor(anchors, tool, reset, used, now, confirmed_reset=False):
+    """记下一次额度读数。同一个锚点只留一条,used 取见过的最大值。
+
+    额度从有消耗的旧窗口回到 0%,同时 reset 前移到新窗口,已经足以确认提前重置。
+    后续空闲时 reset 继续漂移不会连开新周期:只有紧邻的上一锚点有真实消耗时
+    才确认这次 0% 重置。
+    """
     used = float(used or 0)
     rows = anchors.setdefault(tool, [])
+    previous = [
+        row for row in rows
+        if int(row.get("reset", 0)) < reset - _QUOTA_ANCHOR_JITTER
+    ]
+    latest_previous = max(previous, key=lambda row: int(row.get("reset", 0)), default=None)
+    confirmed_reset = bool(
+        confirmed_reset or
+        used >= _QUOTA_CYCLE_MIN_USED_PCT or
+        (latest_previous and
+         latest_previous.get("max_used", 0) >= _QUOTA_CYCLE_MIN_USED_PCT)
+    )
     for row in rows:
         if abs(int(row.get("reset", 0)) - reset) <= _QUOTA_ANCHOR_JITTER:
-            changed = used > row.get("max_used", 0) or now > row.get("last_seen", 0)
+            changed = (
+                used > row.get("max_used", 0) or
+                now > row.get("last_seen", 0) or
+                (confirmed_reset and not row.get("confirmed_reset"))
+            )
             row["max_used"] = max(row.get("max_used", 0), used)
             row["last_seen"] = max(row.get("last_seen", 0), now)
+            if confirmed_reset:
+                row["confirmed_reset"] = True
             return changed
-    rows.append({"reset": reset, "first_seen": now, "last_seen": now, "max_used": used})
+    row = {"reset": reset, "first_seen": now, "last_seen": now, "max_used": used}
+    if confirmed_reset:
+        row["confirmed_reset"] = True
+    rows.append(row)
     return True
 
 
@@ -8558,7 +11412,8 @@ def _merge_quota_anchors(anchors, incoming):
             _record_quota_anchor(
                 anchors, tool, int(reset),
                 used if isinstance(used, (int, float)) else 0,
-                int(seen) if isinstance(seen, (int, float)) else 0)
+                int(seen) if isinstance(seen, (int, float)) else 0,
+                confirmed_reset=row.get("confirmed_reset") is True)
     return anchors
 
 
@@ -8569,17 +11424,13 @@ def _quota_anchor_cycles(anchors, tool, span, limit, now):
     照观测顺序切会切出负时长的区间。排序后每段时长天然为正。
     """
     rows = sorted(anchors.get(tool) or [], key=lambda r: int(r.get("reset", 0)))
-    # 用过的窗口才切历史;但官方刚回满时最新一条 used=0、reset 仍在未来,
-    # 那是新周期(ChatGPT 用量页会显示剩余 100%),不能再滤掉。
-    used_rows = [r for r in rows if r.get("max_used", 0) >= 2]
-    latest = rows[-1] if rows else None
-    if latest is not None:
-        latest_reset = int(latest.get("reset", 0) or 0)
-        last_used_reset = int(used_rows[-1]["reset"]) if used_rows else 0
-        if latest_reset > now and (
-                not used_rows or abs(latest_reset - last_used_reset) > _QUOTA_ANCHOR_JITTER):
-            used_rows = list(used_rows) + [latest]
-    rows = used_rows or rows[-1:]
+    # 窗口空着的时候 reset 会一直跟着 now+7d 漂,那不是真周期。真实消耗和
+    # 「旧窗口有消耗后回到 0%」两种证据都能确认周期;没有证据时只展示最新读数。
+    rows = [
+        row for row in rows
+        if row.get("max_used", 0) >= _QUOTA_CYCLE_MIN_USED_PCT or
+        row.get("confirmed_reset") is True
+    ] or rows[-1:]
 
     cycles = []
     for index, row in enumerate(rows):
@@ -8678,6 +11529,261 @@ def build_quota_detail():
 
 def quota_detail():
     print(json.dumps(build_quota_detail(), ensure_ascii=False))
+
+
+def build_dashboard(period="all"):
+    cache = _load_dashboard_cache()
+    result = build_daily_costs(period, refresh=False, _cache=cache)
+    result["wrapped"] = build_wrapped(period, refresh=False, _cache=cache)
+    return result
+
+
+def dashboard():
+    print(json.dumps(build_dashboard(_arg_period()), ensure_ascii=False))
+
+
+def projects():
+    """项目足迹:从缓存聚合所有项目路径、活跃时间、session 数、token、成本。"""
+    compute()
+    cache = _load_scan_cache()
+
+    proj_map = {}  # path → {sessions, tokens, cost, last_active, model_tok}
+
+    # Claude sessions
+    for f, entry in cache.get("claude", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["sessions"] += 1
+        p["tools"].add("claude")
+        for dk, day in entry.get("days", {}).items():
+            tok = token_total(day)
+            p["tokens"] += tok
+            p["cost"] += day.get("cost", 0)
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            for mn, mv in day.get("models", {}).items():
+                nm = nice_model(mn)
+                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+
+    # Pi sessions
+    for f, entry in cache.get("pi", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["sessions"] += 1
+        p["tools"].add("pi")
+        for dk, day in entry.get("days", {}).items():
+            tok = token_total(day)
+            p["tokens"] += tok
+            p["cost"] += day.get("cost", 0)
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            for mn, mv in day.get("models", {}).items():
+                nm = f"{nice_model(mn)} (Pi)"
+                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+
+    # Prime Agent sessions
+    for f, entry in cache.get("prime_agent", {}).items():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["sessions"] += 1
+        p["tools"].add("prime_agent")
+        for dk, day in entry.get("days", {}).items():
+            tok = token_total(day)
+            p["tokens"] += tok; p["cost"] += day.get("cost", 0)
+            if dk > p["last_active"]: p["last_active"] = dk
+            for mn, mv in day.get("models", {}).items():
+                nm = f"{nice_model(mn)} (Prime Agent)"
+                p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
+
+    # WorkBuddy sessions
+    workbuddy_sessions = {}
+    for _, entry, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("workbuddy")
+        p["tokens"] += token_total(record)
+        p["cost"] += record.get("cost", 0)
+        dk = record.get("date", "")
+        if dk > p["last_active"]:
+            p["last_active"] = dk
+        model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
+        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
+        workbuddy_sessions.setdefault(proj_path, set()).add(record.get("session") or entry.get("sid"))
+    for proj_path, session_ids in workbuddy_sessions.items():
+        proj_map[proj_path]["sessions"] += len(session_ids)
+
+    # DeepSeek Harness sessions
+    deepseek_sessions = {}
+    for _, entry, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("deepseek_harness")
+        p["tokens"] += token_total(record)
+        p["cost"] += record.get("cost", 0)
+        dk = record.get("date", "")
+        if dk > p["last_active"]:
+            p["last_active"] = dk
+        model_name = f"{nice_model(record.get('model', 'deepseek-v4-pro'))} (DeepSeek Harness)"
+        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
+        deepseek_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
+    for proj_path, session_ids in deepseek_sessions.items():
+        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
+
+    # Kimi Code sessions. protocol 1.5 writes one wire per Agent, so count the
+    # shared state.json session id once while summing every Agent's usage.
+    kimi_sessions = {}
+    for entry in cache.get("kimicode", {}).values():
+        if not isinstance(entry, dict):
+            continue
+        proj_path = entry.get("proj") or ""
+        if not proj_path or proj_path == "?":
+            continue
+        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("kimicode")
+        kimi_sessions.setdefault(proj_path, set()).add(entry.get("sid"))
+        for dk, day in entry.get("days", {}).items():
+            p["tokens"] += token_total(day)
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            for model, usage in day.get("models", {}).items():
+                name = f"{nice_model(model)} (Kimi Code)"
+                p["model_tok"][name] = p["model_tok"].get(name, 0) + token_total(usage)
+    for proj_path, session_ids in kimi_sessions.items():
+        proj_map[proj_path]["sessions"] += len({session for session in session_ids if session})
+
+    # Grok Build sessions + unified 日志真实 token，直接复用主刷新缓存。
+    grok_project_sessions = {}
+    for entry in cache.get("grok", {}).values():
+        if not isinstance(entry, dict):
+            continue
+        grok_path = entry.get("project") or ""
+        if not grok_path:
+            continue
+        p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                             "last_active": "", "model_tok": {}, "tools": set()})
+        p["tools"].add("grok")
+        grok_project_sessions.setdefault(grok_path, set()).add(entry.get("sid"))
+        dk = entry.get("date") or ""
+        if dk > p["last_active"]:
+            p["last_active"] = dk
+    for dk, day in cache.get(_GROK_DAYS_CACHE_KEY, {}).items():
+        for grok_path, usage in day.get("projects", {}).items():
+            p = proj_map.setdefault(grok_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                                 "last_active": "", "model_tok": {}, "tools": set()})
+            p["tools"].add("grok")
+            p["tokens"] += int(usage.get("tokens", 0) or 0)
+            p["cost"] += float(usage.get("cost", 0) or 0)
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            session_ids = {sid for sid in usage.get("sessions", []) if sid}
+            grok_project_sessions.setdefault(grok_path, set()).update(session_ids)
+            for model, amount in usage.get("models", {}).items():
+                name = f"{nice_model(model)} (Grok Build)"
+                p["model_tok"][name] = p["model_tok"].get(name, 0) + int(amount or 0)
+    for grok_path, session_ids in grok_project_sessions.items():
+        proj_map[grok_path]["sessions"] += len({sid for sid in session_ids if sid})
+
+    # 检测本地 LISTEN 端口,匹配项目 cwd
+    port_map = _detect_local_servers(set(proj_map.keys()))
+
+    result = []
+    for path, info in proj_map.items():
+        name = os.path.basename(path.rstrip("/")) or path
+        top_model = max(info["model_tok"].items(), key=lambda kv: kv[1])[0] if info["model_tok"] else ""
+        entry = {
+            "path": path,
+            "name": name,
+            "last_active": info["last_active"],
+            "sessions": info["sessions"],
+            "tokens": info["tokens"],
+            "cost": round(info["cost"], 2),
+            "top_model": top_model,
+            "tools": sorted(info["tools"]),
+        }
+        if path in port_map:
+            entry["ports"] = sorted(port_map[path])
+        result.append(entry)
+    result.sort(key=lambda x: x["last_active"], reverse=True)
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def _detect_local_servers(project_paths):
+    """检测哪些项目目录下有进程正在监听 TCP 端口。返回 {path: [port, ...]}。"""
+    import subprocess
+    try:
+        # 1) pid → ports (LISTEN)
+        out1 = subprocess.check_output(
+            ["lsof", "-iTCP", "-sTCP:LISTEN", "-P", "-n", "-F", "pn"],
+            stderr=subprocess.DEVNULL, timeout=10, text=True)
+        pid_ports = {}
+        cur_pid = None
+        for line in out1.strip().split("\n"):
+            if line.startswith("p"):
+                cur_pid = line[1:]
+            elif line.startswith("n") and cur_pid:
+                addr = line[1:]
+                port = addr.rsplit(":", 1)[-1] if ":" in addr else None
+                if port and port.isdigit():
+                    p = int(port)
+                    if 1024 <= p <= 65535:
+                        pid_ports.setdefault(cur_pid, set()).add(p)
+
+        if not pid_ports:
+            return {}
+
+        # 2) pid → cwd (只查有监听端口的 pid，避免全系统扫描超时)
+        pid_arg = ",".join(pid_ports.keys())
+        out2 = subprocess.check_output(
+            ["lsof", "-a", "-d", "cwd", "-p", pid_arg, "-F", "pn"],
+            stderr=subprocess.DEVNULL, timeout=10, text=True)
+        pid_cwd = {}
+        cur_pid = None
+        for line in out2.strip().split("\n"):
+            if line.startswith("p"):
+                cur_pid = line[1:]
+            elif line.startswith("n") and cur_pid:
+                pid_cwd[cur_pid] = line[1:]
+
+        # 3) 交叉匹配: 进程 cwd 是项目路径或其子目录
+        #    匹配最深(最长)的项目路径，避免 home 目录吃掉所有端口
+        home = os.path.expanduser("~")
+        sorted_projs = sorted(project_paths, key=len, reverse=True)
+        result = {}
+        for pid, ports in pid_ports.items():
+            cwd = pid_cwd.get(pid, "")
+            if not cwd or cwd == home:
+                continue
+            for proj in sorted_projs:
+                if proj == home:
+                    continue
+                if cwd == proj or cwd.startswith(proj + "/"):
+                    result.setdefault(proj, set()).update(ports)
+                    break
+        return result
+    except Exception:
+        return {}
 
 
 if __name__ == "__main__":

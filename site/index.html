@@ -596,7 +596,7 @@ body::after{
       <button class="lang-btn" onclick="toggleLang()">
         <span class="en">中文</span><span class="zh">EN</span>
       </button>
-      <a href="https://github.com/lipf6/tokei/releases/latest/download/Tokei.dmg" class="nav-cta">
+      <a href="https://dl.lanshuagent.com/tokei/Tokei-v1.0.36.dmg" class="nav-cta">
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="en">Download</span><span class="zh">下载</span>
       </a>
@@ -641,11 +641,11 @@ body::after{
     </p>
 
     <div class="hero-btns rv rv-d4">
-      <a href="https://github.com/lipf6/tokei/releases/latest/download/Tokei.dmg" class="btn-p">
+      <a href="https://dl.lanshuagent.com/tokei/Tokei-v1.0.36.dmg" class="btn-p">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="en">Download for Mac</span><span class="zh">下载 macOS 版</span>
       </a>
-      <a href="https://github.com/lipf6/tokei" class="btn-s" target="_blank" rel="noopener">
+      <a href="https://github.com/cclank/tokei" class="btn-s" target="_blank" rel="noopener">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         GitHub
       </a>
@@ -895,12 +895,12 @@ body::after{
     <div class="sec-centered rv">
       <div class="sec-label"><span class="en">Supported Tools</span><span class="zh">支持的工具</span></div>
       <h2 class="sec-title">
-        <span class="en">13 AI agents.<br>One dashboard.</span>
-        <span class="zh">13 款 AI agent<br>一个面板</span>
+        <span class="en">20+ AI agents.<br>One dashboard.</span>
+        <span class="zh">20+ 款 AI agent<br>一个面板</span>
       </h2>
       <p class="sec-sub">
-        <span class="en">Tokei reads local session logs from each tool. No API keys, no network access.</span>
-        <span class="zh">Tokei 读取每个工具的本地会话日志。无需 API 密钥，无需网络连接。</span>
+        <span class="en">Usage stays local-first. Optional quota cards reuse an existing sign-in or a Keychain API key.</span>
+        <span class="zh">用量统计坚持本地优先；可选额度卡复用现有登录态或 Keychain API Key。</span>
       </p>
     </div>
 
@@ -921,13 +921,33 @@ body::after{
         <p><span class="en">Tokens, thoughts, cost</span><span class="zh">Token · 思考 · 成本</span></p>
       </div>
       <div class="tool-card rv rv-d4" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#B8C4E6,#667494)">Cu</div>
+        <h3>Cursor</h3>
+        <p><span class="en">Plan quota, on-demand budget</span><span class="zh">套餐额度 · 按量预算</span></p>
+      </div>
+      <div class="tool-card rv rv-d5" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#ED6150,#A92D28)">Ze</div>
+        <h3>Zed</h3>
+        <p><span class="en">Predictions, plan cycle</span><span class="zh">预测额度 · 套餐周期</span></p>
+      </div>
+      <div class="tool-card rv rv-d6" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#2EC6D8,#177C92)">S2</div>
+        <h3>Sub2API</h3>
+        <p><span class="en">Quota windows, balance</span><span class="zh">额度窗口 · 余额</span></p>
+      </div>
+      <div class="tool-card rv rv-d7" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#61AAFA,#3159C9)">ZA</div>
+        <h3>z.ai / GLM</h3>
+        <p><span class="en">Session, cycle, MCP quota</span><span class="zh">会话 · 周期 · MCP 额度</span></p>
+      </div>
+      <div class="tool-card rv rv-d4" data-tilt>
         <div class="tool-icon" style="background:linear-gradient(135deg,var(--silver),#888)"><span style="color:#222">Gk</span></div>
         <h3>Grok Build</h3>
         <p><span class="en">Tokens, cache, reasoning, sessions</span><span class="zh">Token · 缓存 · 推理 · 会话</span></p>
       </div>
       <div class="tool-card rv rv-d5" data-tilt>
         <div class="tool-icon" style="background:linear-gradient(135deg,var(--amber),#C49A30)">Qo</div>
-        <h3>Qoder</h3>
+        <h3>Qoder Desktop</h3>
         <p><span class="en">Calls, duration, context</span><span class="zh">调用 · 时长 · 上下文</span></p>
       </div>
       <div class="tool-card rv rv-d6" data-tilt>
@@ -956,19 +976,39 @@ body::after{
         <p><span class="en">Tokens, cache, cost, models</span><span class="zh">Token · 缓存 · 成本 · 模型</span></p>
       </div>
       <div class="tool-card rv rv-d2" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#2F94F0,#185EA8)">DS</div>
+        <h3>DeepSeek Harness</h3>
+        <p><span class="en">Tokens, cache, reasoning, models</span><span class="zh">Token · 缓存 · 推理 · 模型</span></p>
+      </div>
+      <div class="tool-card rv rv-d2" data-tilt>
         <div class="tool-icon" style="background:linear-gradient(135deg,#7A8CE8,#5367C8)">Qn</div>
         <h3>Qwen Code</h3>
         <p><span class="en">Tokens, thoughts, cache, cost</span><span class="zh">Token · 思考 · 缓存 · 成本</span></p>
       </div>
       <div class="tool-card rv rv-d3" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#32C7A8,#208D7C)">Ki</div>
+        <h3>Kimi Code</h3>
+        <p><span class="en">Tokens, cache, models, subagents</span><span class="zh">Token · 缓存 · 模型 · 子 Agent</span></p>
+      </div>
+      <div class="tool-card rv rv-d4" data-tilt>
         <div class="tool-icon" style="background:linear-gradient(135deg,#D4A94E,#A97825)">QW</div>
         <h3>QoderWork</h3>
         <p><span class="en">Calls, duration, context</span><span class="zh">调用 · 时长 · 上下文</span></p>
       </div>
-      <div class="tool-card rv rv-d4" data-tilt>
-        <div class="tool-icon" style="background:linear-gradient(135deg,#61B3FA,#4F77D8)">Ki</div>
-        <h3>Kimi Code</h3>
-        <p><span class="en">Tokens, cache, models, projects</span><span class="zh">Token · 缓存 · 模型 · 项目</span></p>
+      <div class="tool-card rv rv-d5" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#F5D66F,#C99B2D)">QC</div>
+        <h3>Qoder CLI</h3>
+        <p><span class="en">Sessions, calls, tools, activity</span><span class="zh">会话 · 调用 · 工具 · 活跃</span></p>
+      </div>
+      <div class="tool-card rv rv-d6" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#84CC52,#4E9B28)">ZC</div>
+        <h3>ZCode</h3>
+        <p><span class="en">Tokens, cache, reasoning, models</span><span class="zh">Token · 缓存 · 推理 · 模型</span></p>
+      </div>
+      <div class="tool-card rv rv-d7" data-tilt>
+        <div class="tool-icon" style="background:linear-gradient(135deg,#F27F42,#C44E22)">Mi</div>
+        <h3>MiMoCode</h3>
+        <p><span class="en">Tokens, cache, reasoning, models</span><span class="zh">Token · 缓存 · 推理 · 模型</span></p>
       </div>
     </div>
   </div>
@@ -984,8 +1024,8 @@ body::after{
         <span class="zh">60 秒即刻启动</span>
       </h2>
       <p class="sec-sub">
-        <span class="en">No configuration, no API keys, no cloud accounts. Just install and go.</span>
-        <span class="zh">无需配置，无需 API 密钥，无需云账号。安装即用。</span>
+        <span class="en">Core local usage needs no configuration. Enable external quota cards only when you want them.</span>
+        <span class="zh">核心本地用量无需配置；仅在需要时开启外部 Provider 额度卡。</span>
       </p>
     </div>
     <div class="how-steps">
@@ -1016,18 +1056,18 @@ body::after{
         <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--emerald)" stroke-width="1.5" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/><circle cx="12" cy="16" r="1"/></svg>
       </span>
       <h2>
-        <span class="en">Zero telemetry. Zero network.<br>Your data stays on your Mac.</span>
-        <span class="zh">零遥测 · 零网络<br>数据只留在你的 Mac 上</span>
+        <span class="en">Zero telemetry. Local-first.<br>Your usage data stays on your Mac.</span>
+        <span class="zh">零遥测 · 本地优先<br>用量数据只留在你的 Mac 上</span>
       </h2>
       <p>
-        <span class="en">Tokei reads only local session logs. It never connects to the internet, never sends data anywhere, and never will.</span>
-        <span class="zh">Tokei 仅读取本地会话日志。从不联网，从不上传数据，永远不会。</span>
+        <span class="en">Core analytics read local logs. External quota cards are off by default and only contact the selected provider after you enable them.</span>
+        <span class="zh">核心分析读取本地日志。外部额度卡默认关闭，仅在你开启后联系对应 Provider。</span>
       </p>
       <div class="pills">
         <span class="pill"><span class="en">No analytics</span><span class="zh">无分析追踪</span></span>
         <span class="pill"><span class="en">No tracking</span><span class="zh">无行为监控</span></span>
         <span class="pill"><span class="en">No cloud required</span><span class="zh">无需云端</span></span>
-        <span class="pill"><span class="en">100% offline</span><span class="zh">100% 离线</span></span>
+        <span class="pill"><span class="en">Quota APIs opt-in</span><span class="zh">额度 API 可选</span></span>
       </div>
     </div>
   </div>
@@ -1061,7 +1101,7 @@ body::after{
             <td style="text-align:left;padding:10px 16px;color:var(--t2)">
               <span class="en">Supported tools</span><span class="zh">支持工具</span>
             </td>
-            <td style="padding:10px 16px;color:var(--t2)">13</td>
+            <td style="padding:10px 16px;color:var(--t2)">20+</td>
             <td style="padding:10px 16px;color:var(--t2)">40+</td>
           </tr>
           <tr style="border-bottom:1px solid var(--border)">
@@ -1136,7 +1176,7 @@ body::after{
               <span class="en">Network required</span><span class="zh">需要联网</span>
             </td>
             <td style="padding:10px 16px">
-              <span class="en">No</span><span class="zh">否</span>
+              <span class="en">Only optional quotas/updates</span><span class="zh">仅可选额度/更新</span>
             </td>
             <td style="padding:10px 16px;color:var(--t2)">
               <span class="en">Yes (API/cookies)</span><span class="zh">是（API/Cookie）</span>
@@ -1147,7 +1187,7 @@ body::after{
               <span class="en">Login required</span><span class="zh">需要登录</span>
             </td>
             <td style="padding:10px 16px">
-              <span class="en">No</span><span class="zh">否</span>
+              <span class="en">Core: no; quotas reuse existing auth</span><span class="zh">核心：否；额度复用已有登录态</span>
             </td>
             <td style="padding:10px 16px;color:var(--t2)">
               <span class="en">Yes (per provider)</span><span class="zh">是（按提供商）</span>
@@ -1158,7 +1198,7 @@ body::after{
               <span class="en">Data source</span><span class="zh">数据来源</span>
             </td>
             <td style="padding:10px 16px;color:var(--t2)">
-              <span class="en">Local logs</span><span class="zh">本地日志</span>
+              <span class="en">Local logs + optional quota APIs</span><span class="zh">本地日志 + 可选额度 API</span>
             </td>
             <td style="padding:10px 16px;color:var(--t2)">
               <span class="en">Remote APIs</span><span class="zh">远程 API</span>
@@ -1168,8 +1208,8 @@ body::after{
       </table>
     </div>
     <p style="max-width:600px;margin:24px auto 0;font-size:13px;color:var(--t3);line-height:1.6;text-align:center">
-      <span class="en">CodexBar excels at provider coverage and quota visibility. Tokei goes deeper — token-level analytics, cost trends, project breakdowns, and cross-device sync — all without needing a single login.</span>
-      <span class="zh">CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 更深入——Token 级分析、成本趋势、项目维度拆分、跨设备同步——全部无需登录。</span>
+      <span class="en">CodexBar excels at provider coverage and quota visibility. Tokei keeps core analytics local-first, while optional quota cards reuse an existing sign-in.</span>
+      <span class="zh">CodexBar 在提供商覆盖和配额可见性上表现出色。Tokei 的核心分析保持本地优先，可选额度卡复用已有登录态。</span>
     </p>
   </div>
 </section>
@@ -1211,8 +1251,8 @@ body::after{
           </li>
         </ol>
         <p style="font-size:13px;color:var(--t3);margin-top:14px">
-          <span class="en">That's it. No account, no API key, no configuration needed.</span>
-          <span class="zh">就这么简单。无需账号、无需 API 密钥、无需任何配置。</span>
+          <span class="en">That's it for local usage. External quota cards remain optional.</span>
+          <span class="zh">本地用量到这里即可；外部 Provider 额度卡始终是可选项。</span>
         </p>
       </div>
 
@@ -1245,7 +1285,7 @@ body::after{
           <span class="zh">或者让 AI 帮你完成全部配置 —— 复制以下提示词到 <strong style="color:var(--t2)">Claude Code</strong>：</span>
         </p>
         <div style="position:relative;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:10px;padding:12px 16px;font-size:13px;color:var(--t2);line-height:1.5;cursor:pointer" onclick="navigator.clipboard.writeText(this.querySelector('.cp-text').textContent);this.querySelector('.cp-ok').style.opacity=1;setTimeout(()=>this.querySelector('.cp-ok').style.opacity=0,1500)">
-          <span class="cp-text"><span class="en">Read https://raw.githubusercontent.com/lipf6/tokei/main/skills/tokei-setup.md and help me set up Tokei multi-device sync</span><span class="zh">读取 https://raw.githubusercontent.com/lipf6/tokei/main/skills/tokei-setup.md 帮我配置 Tokei 多设备同步</span></span>
+          <span class="cp-text"><span class="en">Read https://raw.githubusercontent.com/cclank/tokei/main/skills/tokei-setup.md and help me set up Tokei multi-device sync</span><span class="zh">读取 https://raw.githubusercontent.com/cclank/tokei/main/skills/tokei-setup.md 帮我配置 Tokei 多设备同步</span></span>
           <span class="cp-ok" style="position:absolute;top:8px;right:12px;font-size:11px;color:var(--emerald);opacity:0;transition:opacity .3s">✓ <span class="en">Copied</span><span class="zh">已复制</span></span>
         </div>
       </div>
@@ -1268,11 +1308,11 @@ body::after{
       <span class="zh">免费、开源，为在意自己工具的开发者而建。</span>
     </p>
     <div class="hero-btns" style="margin-top:44px">
-      <a href="https://github.com/lipf6/tokei/releases/latest/download/Tokei.dmg" class="btn-p" target="_blank" rel="noopener">
+      <a href="https://dl.lanshuagent.com/tokei/Tokei-v1.0.36.dmg" class="btn-p" target="_blank" rel="noopener">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4 7l4 4 4-4M2 14h12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="en">Download for macOS</span><span class="zh">下载 macOS 版</span>
       </a>
-      <a href="https://github.com/lipf6/tokei" class="btn-s" target="_blank" rel="noopener">
+      <a href="https://github.com/cclank/tokei" class="btn-s" target="_blank" rel="noopener">
         <span class="en">View source code</span><span class="zh">查看源码</span>
       </a>
     </div>
@@ -1288,7 +1328,7 @@ body::after{
       <span class="zh">由 AI 赋能的开发者用心打造</span>
     </div>
     <div class="footer-r">
-      <a href="https://github.com/lipf6/tokei" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/cclank/tokei" target="_blank" rel="noopener">GitHub</a>
       <a href="#features"><span class="en">Features</span><span class="zh">功能</span></a>
       <a href="#privacy"><span class="en">Privacy</span><span class="zh">隐私</span></a>
     </div>

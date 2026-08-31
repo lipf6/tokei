@@ -16,10 +16,11 @@ final class Updater: NSObject, ObservableObject, URLSessionDownloadDelegate {
         }
     }
 
-    static let releaseTag = "v1.0.34"
+    static let releaseTag = "v1.0.37"
     static let automaticCheckInterval: TimeInterval = 6 * 3600
     @Published var state: State = .idle
 
+    // fork 更新源：只查自己的 GitHub Release，不碰上游 dl.lanshuagent.com
     private let apiURLs = [
         URL(string: "https://api.github.com/repos/lipf6/tokei/releases/latest")!,
     ]

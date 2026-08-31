@@ -20,7 +20,7 @@ private enum UpdaterSecurityCheck {
         try testVersionSelection(digest: digest)
 
         try expect(UpdateSecurity.isAllowedMetadataURL(
-            try url("https://api.github.com/repos/lipf6/tokei/releases/latest")
+            try url("https://api.github.com/repos/cclank/tokei/releases/latest")
         ), "GitHub metadata URL should be allowed")
         try expect(UpdateSecurity.isAllowedDownloadSourceURL(
             try url("https://dl.lanshuagent.com/tokei/Tokei-v1.0.14.dmg")
@@ -44,10 +44,10 @@ private enum UpdaterSecurityCheck {
 
         let githubJSON: [String: Any] = [
             "tag_name": "v1.0.14",
-            "url": "https://api.github.com/repos/lipf6/tokei/releases/1",
+            "url": "https://api.github.com/repos/cclank/tokei/releases/1",
             "assets": [[
                 "name": "Tokei.dmg",
-                "browser_download_url": "https://github.com/lipf6/tokei/releases/download/v1.0.14/Tokei.dmg",
+                "browser_download_url": "https://github.com/cclank/tokei/releases/download/v1.0.14/Tokei.dmg",
                 "digest": "sha256:\(digest.uppercased())",
             ]],
         ]

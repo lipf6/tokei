@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -131,17 +130,6 @@ class CodexDedupedDaysTests(unittest.TestCase):
 
 
 class CodexScanDedupTests(unittest.TestCase):
-    def setUp(self):
-        self.cache_tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.cache_tmp.cleanup)
-        self.cache_patch = mock.patch.object(
-            USAGE,
-            "_SCAN_CACHE_FILE",
-            str(Path(self.cache_tmp.name) / "scan_cache.json"),
-        )
-        self.cache_patch.start()
-        self.addCleanup(self.cache_patch.stop)
-
     def session_meta(self, sid, forked_from_id=None):
         payload = {
             "session_id": forked_from_id or sid,
@@ -187,7 +175,7 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(session_id, "child")
         self.assertEqual(parent_id, "parent")
 
-    def token_count(self, ts, total, last, ordinal=None):
+    def token_count(self, ts, total, last, ordinal=None, rate_limits=None):
         record = {"timestamp": ts}
         if ordinal is not None:
             record["ordinal"] = ordinal
@@ -211,6 +199,8 @@ class CodexScanDedupTests(unittest.TestCase):
                 },
             },
         })
+        if rate_limits is not None:
+            record["payload"]["rate_limits"] = rate_limits
         return json.dumps(record)
 
     def turn_context(self, ts, model, ordinal=None):
@@ -269,6 +259,41 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(models["openai/gpt-5.4"]["reason"], 4)
         self.assertEqual(models["openai/gpt-5.5"]["in"], 10)
         self.assertEqual(models["openai/gpt-5.5"]["cr"], 40)
+
+    def test_scan_ignores_runtime_quota_label_for_model_attribution(self):
+        # rate_limits.limit_name 是额度/路由名，不是用户选的模型，
+        # 不能凭空造出一个模型桶。来自 PR #51 的回归用例。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-runtime-label.jsonl"
+            path.write_text("\n".join([
+                self.session_meta("runtime-label"),
+                self.turn_context("2024-01-08T00:00:00Z", "gpt-5.5"),
+                self.token_count(
+                    "2024-01-08T00:01:00Z", (100, 80, 10, 4), (100, 80, 10, 4),
+                    rate_limits={"limit_name": "GPT-5.3-Codex-Spark"},
+                ),
+            ]) + "\n", encoding="utf-8")
+            day = datetime(2024, 1, 8, tzinfo=timezone.utc)
+            bounds = {
+                "today": day, "yesterday": day - timedelta(days=1), "week": day,
+                "last_week": day - timedelta(days=7), "last_week_end": day,
+                "month": day.replace(day=1), "year": day.replace(month=1, day=1),
+            }
+            old_dir = USAGE.CODEX_DIR
+            old_archive_dir = USAGE.CODEX_ARCHIVED_DIR
+            USAGE.CODEX_DIR = tmp
+            USAGE.CODEX_ARCHIVED_DIR = str(Path(tmp) / "archived_sessions")
+            try:
+                with mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                    result = USAGE.scan_codex(bounds, {"v": USAGE._SCAN_CACHE_VERSION})
+            finally:
+                USAGE.CODEX_DIR = old_dir
+                USAGE.CODEX_ARCHIVED_DIR = old_archive_dir
+
+        models = result["ranges"]["all"]["models"]
+        self.assertEqual(sorted(models), ["openai/gpt-5.5"])
+        self.assertEqual(models["openai/gpt-5.5"]["in"], 20)
+        self.assertEqual(models["openai/gpt-5.5"]["cr"], 80)
 
     def test_scan_mixes_legacy_and_ordinal_records_with_model_attribution(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,7 +382,7 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(set(usage["models"]), {"openai/gpt-5.4"})
         self.assertEqual(usage["models"]["openai/gpt-5.4"]["in"], 20)
 
-    def test_parser_upgrade_rescans_empty_model_v2_cache_from_zero(self):
+    def test_ordinal_parser_upgrade_rescans_model_v2_cache_from_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sessions = root / "sessions"
@@ -403,8 +428,10 @@ class CodexScanDedupTests(unittest.TestCase):
                     },
                 },
             }
+            scan_cache_path = root / "scan-cache.json"
 
-            with mock.patch.object(USAGE, "CODEX_DIR", str(sessions)), \
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache_path)), \
+                 mock.patch.object(USAGE, "CODEX_DIR", str(sessions)), \
                  mock.patch.object(
                      USAGE, "CODEX_ARCHIVED_DIR", str(root / "archived_sessions")), \
                  mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
@@ -428,162 +455,64 @@ class CodexScanDedupTests(unittest.TestCase):
             USAGE._CODEX_PARSER_VERSION,
         )
 
-    def test_parser_upgrade_rescans_nonempty_model_v2_cache_from_zero(self):
+    def test_parser_upgrade_reuses_nonempty_model_v2_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sessions = root / "sessions"
             sessions.mkdir()
-            path = sessions / "rollout-nonempty-v2-cache.jsonl"
-            path.write_text("\n".join([
-                self.session_meta("nonempty-v2-cache"),
-                self.turn_context(
-                    "2024-01-08T00:00:00Z", "gpt-5.4", ordinal=1),
-                self.token_count(
-                    "2024-01-08T00:01:00Z",
-                    (100, 80, 5, 2),
-                    (100, 80, 5, 2),
-                    ordinal=2,
-                ),
-            ]) + "\n", encoding="utf-8")
+            path = sessions / "rollout-cached.jsonl"
+            path.write_text("{}\n", encoding="utf-8")
             source_path = str(path.resolve())
             st = path.stat()
-            stale_event = event(
+            cached_event = event(
                 "2024-01-08T00:01:00+00:00",
                 "2024-01-08",
-                (999, 0, 1, 0),
-                (999, 0, 1, 0),
-                0.0,
+                (100, 80, 5, 2),
+                (100, 80, 5, 2),
+                0.5,
             ) + ["openai/gpt-5.4"]
-            stale_days = {}
-            USAGE._codex_add_event(stale_days, stale_event)
-            event_cache_size = USAGE._codex_write_event_cache(
-                source_path, [stale_event])
-            cache = {
-                "v": USAGE._SCAN_CACHE_VERSION,
-                "codex": {
-                    source_path: {
-                        "sig": f"{st.st_mtime_ns}:{st.st_size}",
-                        "days": stale_days,
-                        "deduped_days": stale_days,
-                        "session_id": "nonempty-v2-cache",
-                        "forked_from_id": None,
-                        "active_model": "openai/gpt-5.4",
-                        "model_version": 2,
-                        "file_id": f"{st.st_dev}:{st.st_ino}",
-                        "parsed_size": st.st_size,
-                        "parsed_guard": USAGE._codex_offset_guard(
-                            source_path, st.st_size),
-                        "event_cache_size": event_cache_size,
-                        "event_count": 1,
-                        "first_keys": [list(USAGE._codex_event_key(stale_event))],
-                        "first_event_ts": stale_event[0],
-                        "last_event_ts": stale_event[0],
-                        "drop_count": 0,
-                        "dedupe_open": True,
-                        "canonical": True,
-                    },
-                },
-            }
-
-            with mock.patch.object(USAGE, "CODEX_DIR", str(sessions)), \
-                 mock.patch.object(
-                     USAGE, "CODEX_ARCHIVED_DIR", str(root / "archived_sessions")), \
-                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
-                original_iterator = USAGE._iter_codex_usage_records
-                with mock.patch.object(
-                    USAGE, "_iter_codex_usage_records", wraps=original_iterator,
-                ) as iterator:
-                    result = USAGE.scan_codex(self.bounds(), cache)
-                cached_events = list(USAGE._iter_codex_cached_events(source_path))
-
-        iterator.assert_called_once()
-        self.assertEqual(iterator.call_args.kwargs["start_offset"], 0)
-        usage = result["ranges"]["all"]
-        self.assertEqual(usage["in"], 100)
-        self.assertEqual(usage["cached"], 80)
-        self.assertEqual(usage["out"], 5)
-        self.assertEqual(len(cached_events), 1)
-        self.assertEqual(cached_events[0][2:6], [100, 80, 5, 2])
-        entry = cache["codex"][source_path]
-        self.assertEqual(entry["parser_version"], USAGE._CODEX_PARSER_VERSION)
-        self.assertNotIn("model_version", entry)
-
-    def test_v3_rescan_checkpoint_resumes_completed_files_after_interruption(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            sessions = root / "sessions"
-            sessions.mkdir()
-            paths = []
-            for suffix in ("a", "b"):
-                path = sessions / f"rollout-{suffix}.jsonl"
-                path.write_text("\n".join([
-                    self.session_meta(f"checkpoint-{suffix}"),
-                    self.turn_context(
-                        "2024-01-08T00:00:00Z", "gpt-5.4", ordinal=1),
-                    self.token_count(
-                        "2024-01-08T00:01:00Z",
-                        (100, 80, 5, 2),
-                        (100, 80, 5, 2),
-                        ordinal=2,
-                    ),
-                ]) + "\n", encoding="utf-8")
-                paths.append(str(path.resolve()))
-
+            days = {}
+            USAGE._codex_add_event(days, cached_event)
             cache = {"v": USAGE._SCAN_CACHE_VERSION, "codex": {}}
-            for path in paths:
-                st = os.stat(path)
-                cache["codex"][path] = {
-                    "sig": f"{st.st_mtime_ns}:{st.st_size}",
-                    "days": {},
-                    "deduped_days": {},
-                    "model_version": 2,
-                    "file_id": f"{st.st_dev}:{st.st_ino}",
-                    "parsed_size": st.st_size,
-                    "parsed_guard": USAGE._codex_offset_guard(path, st.st_size),
-                }
+            scan_cache_path = root / "scan-cache.json"
 
-            cache_path = root / "scan_cache.json"
-            original_iterator = USAGE._iter_codex_usage_records
-
-            def interrupt_second_file(path, *args, **kwargs):
-                if os.fspath(path) == paths[1]:
-                    raise KeyboardInterrupt
-                return original_iterator(path, *args, **kwargs)
-
-            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(cache_path)), \
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache_path)), \
                  mock.patch.object(USAGE, "CODEX_DIR", str(sessions)), \
                  mock.patch.object(
                      USAGE, "CODEX_ARCHIVED_DIR", str(root / "archived_sessions")), \
                  mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
-                with mock.patch.object(
-                        USAGE.time, "monotonic", side_effect=[0.0, 6.0, 6.0]), \
-                     mock.patch.object(
-                         USAGE,
-                         "_iter_codex_usage_records",
-                         side_effect=interrupt_second_file,
-                     ):
-                    with self.assertRaises(KeyboardInterrupt):
-                        USAGE.scan_codex(self.bounds(), cache)
+                cache_size = USAGE._codex_write_event_cache(source_path, [cached_event])
+                cache["codex"][source_path] = {
+                    "sig": f"{st.st_mtime_ns}:{st.st_size}",
+                    "days": days,
+                    "deduped_days": days,
+                    "session_id": "cached",
+                    "forked_from_id": None,
+                    "active_model": "openai/gpt-5.4",
+                    "model_version": 2,
+                    "file_id": f"{st.st_dev}:{st.st_ino}",
+                    "parsed_size": st.st_size,
+                    "parsed_guard": USAGE._codex_offset_guard(source_path, st.st_size),
+                    "event_cache_size": cache_size,
+                    "event_count": 1,
+                    "first_keys": [list(USAGE._codex_event_key(cached_event))],
+                    "first_event_ts": cached_event[0],
+                    "last_event_ts": cached_event[0],
+                    "drop_count": 0,
+                    "dedupe_open": True,
+                    "canonical": True,
+                }
+                with mock.patch.object(USAGE, "_iter_codex_usage_records") as iterator:
+                    result = USAGE.scan_codex(self.bounds(), cache)
 
-                checkpoint = json.loads(cache_path.read_text(encoding="utf-8"))
-                self.assertEqual(
-                    checkpoint["codex"][paths[0]]["parser_version"],
-                    USAGE._CODEX_PARSER_VERSION,
-                )
-                self.assertEqual(
-                    checkpoint["codex"][paths[1]]["model_version"], 2)
-
-                resumed_cache = USAGE._load_scan_cache()
-                with mock.patch.object(
-                    USAGE, "_iter_codex_usage_records", wraps=original_iterator,
-                ) as iterator:
-                    result = USAGE.scan_codex(self.bounds(), resumed_cache)
-
-        iterator.assert_called_once()
-        self.assertEqual(iterator.call_args.args[0], paths[1])
-        self.assertEqual(iterator.call_args.kwargs["start_offset"], 0)
-        self.assertEqual(result["ranges"]["all"]["in"], 200)
-        self.assertEqual(result["ranges"]["all"]["cached"], 160)
+        iterator.assert_not_called()
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 100)
+        self.assertEqual(usage["cached"], 80)
+        self.assertEqual(usage["out"], 5)
+        entry = cache["codex"][source_path]
+        self.assertEqual(entry["parser_version"], USAGE._CODEX_PARSER_VERSION)
+        self.assertNotIn("model_version", entry)
 
     def test_scan_parses_only_appended_codex_records(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -870,43 +799,6 @@ class CodexScanDedupTests(unittest.TestCase):
 
 
 class ScanCacheMigrationTests(unittest.TestCase):
-    def test_temp_cache_and_sidecars_migrate_with_private_permissions(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            legacy_cache = root / "_tokei_scan_cache.json"
-            legacy_cache.write_text(
-                json.dumps({"v": USAGE._SCAN_CACHE_VERSION, "codex": {}}),
-                encoding="utf-8",
-            )
-            legacy_cache.chmod(0o644)
-            legacy_events = Path(
-                f"{legacy_cache}{USAGE._CODEX_EVENT_CACHE_SUFFIX}")
-            legacy_events.mkdir(mode=0o755)
-            legacy_sidecar = legacy_events / "event.jsonl"
-            legacy_sidecar.write_text("[]\n", encoding="utf-8")
-            legacy_sidecar.chmod(0o644)
-
-            cache_dir = root / "persistent" / "cache"
-            destination = cache_dir / "scan_cache.json"
-            destination_events = Path(
-                f"{destination}{USAGE._CODEX_EVENT_CACHE_SUFFIX}")
-            with mock.patch.object(
-                    USAGE, "_LEGACY_SCAN_CACHE_FILE", str(legacy_cache)), \
-                 mock.patch.object(USAGE, "_SCAN_CACHE_DIR", str(cache_dir)), \
-                 mock.patch.object(
-                     USAGE, "_DEFAULT_SCAN_CACHE_FILE", str(destination)), \
-                 mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(destination)):
-                cache = USAGE._load_scan_cache()
-
-            migrated_sidecar = destination_events / legacy_sidecar.name
-            self.assertEqual(cache["v"], USAGE._SCAN_CACHE_VERSION)
-            self.assertTrue(destination.is_file())
-            self.assertEqual(migrated_sidecar.read_text(encoding="utf-8"), "[]\n")
-            self.assertEqual(cache_dir.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(destination_events.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(migrated_sidecar.stat().st_mode & 0o777, 0o600)
-
     def test_v19_codex_events_move_to_sidecar_cache(self):
         first = event(
             "2026-07-10T00:00:00+00:00",

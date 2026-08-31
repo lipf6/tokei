@@ -256,6 +256,75 @@ final class SyncManager {
         } ?? false
     }
 
+    /// 千问办公额度：默认关闭，只允许 Python 采集器查询本机 QwenWork MCP 适配器。
+    @discardableResult
+    static func setQwenWorkQuotaEnabled(_ enabled: Bool) -> Bool {
+        withConfigLock {
+            var dictionary: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: configPath.path) {
+                let data = try Data(contentsOf: configPath)
+                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                dictionary = object
+            }
+            dictionary["qwenwork_quota_enabled"] = enabled
+            try writeConfigDictionary(dictionary)
+            return true
+        } ?? false
+    }
+
+    private static let providerQuotaIDs: Set<String> = [
+        "cursor", "zed", "sub2api", "zai", "antigravity",
+    ]
+    private static let providerSettingKeys: Set<String> = [
+        "sub2api_base_url", "zai_region", "zai_usage_scope",
+        "zai_organization", "zai_project",
+    ]
+
+    @discardableResult
+    static func setProviderQuotaEnabled(_ provider: String, enabled: Bool) -> Bool {
+        guard providerQuotaIDs.contains(provider) else { return false }
+        return setConfigValue(enabled, forKey: "\(provider)_quota_enabled")
+    }
+
+    static func providerSetting(_ key: String) -> String? {
+        guard providerSettingKeys.contains(key),
+              let data = try? Data(contentsOf: configPath),
+              let dictionary = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let value = dictionary[key] as? String else { return nil }
+        let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? nil : cleaned
+    }
+
+    @discardableResult
+    static func setProviderSetting(_ value: String?, forKey key: String) -> Bool {
+        guard providerSettingKeys.contains(key) else { return false }
+        let cleaned = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stored = (cleaned?.isEmpty == false) ? cleaned : nil
+        return setConfigValue(stored, forKey: key)
+    }
+
+    private static func setConfigValue(_ value: Any?, forKey key: String) -> Bool {
+        withConfigLock {
+            var dictionary: [String: Any] = [:]
+            if FileManager.default.fileExists(atPath: configPath.path) {
+                let data = try Data(contentsOf: configPath)
+                guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                dictionary = object
+            }
+            if let value {
+                dictionary[key] = value
+            } else {
+                dictionary.removeValue(forKey: key)
+            }
+            try writeConfigDictionary(dictionary)
+            return true
+        } ?? false
+    }
+
     // MARK: - Read peers
 
     func loadPeers() -> PeerLoadReport {
@@ -389,10 +458,12 @@ final class SyncManager {
             mergeRanges(&u.mimocode.ranges, peer.usage.mimocode.ranges, pairs)
             mergeRanges(&u.openclaw.ranges, peer.usage.openclaw.ranges, pairs)
             mergeRanges(&u.pi.ranges, peer.usage.pi.ranges, pairs)
+            mergeRanges(&u.prime_agent.ranges, peer.usage.prime_agent.ranges, pairs)
             mergeRanges(&u.workbuddy.ranges, peer.usage.workbuddy.ranges, pairs)
+            mergeRanges(&u.deepseekHarness.ranges, peer.usage.deepseekHarness.ranges, pairs)
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
-            mergeRanges(&u.kimi.ranges, peer.usage.kimi.ranges, pairs)
+            mergeRanges(&u.kimicode.ranges, peer.usage.kimicode.ranges, pairs)
         }
         return u
     }
@@ -630,13 +701,22 @@ final class SyncManager {
 
     private static func mergeTokenModels(_ dst: inout [TokenModelStat], _ src: [TokenModelStat]) {
         for m in src {
-            if let idx = dst.firstIndex(where: { $0.name == m.name }) {
+            let index: Int?
+            if let modelId = m.modelId {
+                index = dst.firstIndex { $0.modelId == modelId }
+            } else {
+                index = dst.firstIndex { $0.modelId == nil && $0.name == m.name }
+            }
+            if let idx = index {
                 dst[idx].in += m.in
                 dst[idx].out += m.out
                 dst[idx].cr += m.cr
                 dst[idx].cw += m.cw
                 dst[idx].reason += m.reason
                 dst[idx].cost += m.cost
+                if dst[idx].name == "未知" && m.name != "未知" {
+                    dst[idx].name = m.name
+                }
             } else {
                 dst.append(m)
             }

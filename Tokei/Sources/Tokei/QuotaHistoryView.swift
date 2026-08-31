@@ -6,8 +6,7 @@ private extension QuotaHistoryTool {
         switch self {
         case .claude: return Theme.claude
         case .codex: return Theme.codex
-        case .grok: return Theme.grok
-        case .kimi: return Theme.kimi
+        case .kimi: return Theme.kimicode
         }
     }
 }
@@ -56,37 +55,29 @@ private struct QuotaHistoryFrame {
 struct QuotaHistoryView: View {
     @ObservedObject var history: QuotaHistoryStore
     @ObservedObject private var detail = QuotaDetailRepository.shared
-    @State private var tool: QuotaHistoryTool = .codex
+    @State private var tool: QuotaHistoryTool = .claude
     @State private var span: QuotaHistorySpan = .day
     @State private var cycleTool: String?
 
     /// 有周期数据的工具,固定顺序 —— 免得刷新一次卡片就换个位置。
     private var cycleTools: [String] {
         let present = Set((detail.payload?.cycles ?? []).map(\.tool))
-        return ["claude", "codex", "grok", "kimi"].filter(present.contains)
+        return ["claude", "codex", "grok"].filter(present.contains)
     }
 
-    /// 轨迹 Tab 只出当前跨度里真正有额度/活动的工具；刚开始记录时也带上已有周额度卡的工具。
-    private var visibleTools: [QuotaHistoryTool] {
-        let start = Date().addingTimeInterval(TimeInterval(-span.rawValue * 60 * 60))
-        let spanPoints = history.points(since: start)
-        let fromHistory = Set(QuotaHistoryTool.allCases.filter { tool in
-            spanPoints.contains { $0.hasTrajectory(for: tool) }
-        })
-        let fromCycles = Set(cycleTools.compactMap { key in
-            QuotaHistoryTool.allCases.first { $0.cycleKey == key }
-        })
-        return QuotaHistoryTool.allCases.filter { fromHistory.contains($0) || fromCycles.contains($0) }
-    }
-
-    private func snapToolIfNeeded() {
-        if !visibleTools.contains(tool) {
-            tool = visibleTools.first ?? .codex
-        }
+    private var visibleCycleTools: [String] {
+        guard let cycleTool, cycleTools.contains(cycleTool) else { return cycleTools }
+        return [cycleTool]
     }
 
     private func currentCycle(_ tool: String) -> QuotaCycle? {
         (detail.payload?.cycles ?? []).first { $0.tool == tool && $0.current }
+    }
+
+    private func completedCycles(_ tool: String) -> [QuotaCycle] {
+        (detail.payload?.cycles ?? [])
+            .filter { $0.tool == tool && !$0.current }
+            .sorted { $0.start > $1.start }
     }
 
     var body: some View {
@@ -100,13 +91,7 @@ struct QuotaHistoryView: View {
             }
             footnote
         }
-        .onAppear {
-            detail.load()
-            snapToolIfNeeded()
-        }
-        .onChange(of: span) { _ in snapToolIfNeeded() }
-        .onChange(of: history.points.count) { _ in snapToolIfNeeded() }
-        .onChange(of: detail.payload?.now) { _ in snapToolIfNeeded() }
+        .onAppear { detail.load() }
     }
 
     @ViewBuilder
@@ -142,22 +127,13 @@ struct QuotaHistoryView: View {
             cycleHeader
             if detail.payload == nil {
                 Card(tint: Theme.codex) { cyclePlaceholder("正在读取周额度…") }
-            } else if cycleTools.isEmpty {
+            } else if visibleCycleTools.isEmpty {
                 Card(tint: Theme.codex) {
                     cyclePlaceholder("所有订阅的额度重置时间都拿不到，定位不了周期")
                 }
-            } else if let cycleTool {
-                cycleGroup(cycleTool)
             } else {
-                Card(tint: Theme.codex) {
-                    VStack(spacing: 0) {
-                        ForEach(Array(cycleTools.enumerated()), id: \.element) { index, tool in
-                            cycleOverviewRow(tool)
-                            if index < cycleTools.count - 1 {
-                                Divider().overlay(Color.white.opacity(0.08))
-                            }
-                        }
-                    }
+                ForEach(visibleCycleTools, id: \.self) { tool in
+                    cycleGroup(tool)
                 }
             }
             if cycleTool == nil {
@@ -174,7 +150,7 @@ struct QuotaHistoryView: View {
     private var cycleHeader: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("周额度消耗")
+                Text("一个周额度用了多少")
                     .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(Theme.tPrimary)
                 Text(cycleSubtitle)
@@ -184,7 +160,7 @@ struct QuotaHistoryView: View {
             Spacer()
             if cycleTools.count > 1 {
                 Picker("", selection: $cycleTool) {
-                    Text("概览").tag(String?.none)
+                    Text("全部").tag(String?.none)
                     ForEach(cycleTools, id: \.self) { tool in
                         Text(cycleName(tool)).tag(String?.some(tool))
                     }
@@ -197,7 +173,7 @@ struct QuotaHistoryView: View {
     }
 
     private var cycleSubtitle: String {
-        var text = "本周期额度与 token 对照"
+        var text = "从上次额度回满算到下次回满"
         if let devices = detail.payload?.devices, devices.count > 1 {
             text += " · \(devices.count) 台设备已合并"
         }
@@ -208,94 +184,23 @@ struct QuotaHistoryView: View {
         return text
     }
 
-    /// 概览只保留做决策需要的四项：工具、回满点、已用比例和对应 token。
-    /// 预测放到单工具详情，避免首屏被重复说明和多张大卡淹没。
-    @ViewBuilder
-    private func cycleOverviewRow(_ tool: String) -> some View {
-        if let cycle = currentCycle(tool) {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(cycleName(tool))
-                        .font(.system(size: 11.5, weight: .bold))
-                        .foregroundStyle(cycleTint(tool))
-                    Text("\(Fmt.reset(cycle.end)) 回满")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Theme.tTertiary)
-                    Spacer()
-                    Text((cycle.approx ? "≈" : "") + Fmt.human(cycle.tokens) + " tokens")
-                        .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Theme.tPrimary)
-                }
-                HStack(spacing: 9) {
-                    Text(cycle.used_pct.map { String(format: "已用 %.0f%%", $0) } ?? "额度待刷新")
-                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(Theme.tSecondary)
-                        .frame(width: 64, alignment: .leading)
-                    overviewProgress(cycle.used_pct, tint: cycleTint(tool))
-                    Text(Fmt.countdown(cycle.end))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Theme.tTertiary)
-                        .frame(width: 58, alignment: .trailing)
-                }
-                let pace = paceText(cycle)
-                Text(pace.text)
-                    .font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(pace.color)
-            }
-            .padding(.vertical, 8)
-        } else {
-            HStack(spacing: 8) {
-                Text(cycleName(tool))
-                    .font(.system(size: 11.5, weight: .bold))
-                    .foregroundStyle(cycleTint(tool))
-                Text("等待新的周额度读数")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(Theme.tTertiary)
-                Spacer()
-            }
-            .padding(.vertical, 11)
-        }
-    }
-
-    private func overviewProgress(_ used: Double?, tint: Color) -> some View {
-        GeometryReader { geometry in
-            let ratio = min(max(used ?? 0, 0), 100) / 100
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.08))
-                Capsule()
-                    .fill(tint.opacity(0.88))
-                    .frame(width: geometry.size.width * ratio)
-            }
-        }
-        .frame(height: 6)
-    }
-
+    /// 一个 harness 一块:当前卡片紧跟它自己的历史,不和别的工具按日期混排。
     @ViewBuilder
     private func cycleGroup(_ tool: String) -> some View {
-        if let cycle = currentCycle(tool) {
-            Card(tint: cycleTint(tool)) { cycleCard(cycle) }
-        } else {
-            Card(tint: cycleTint(tool)) {
-                cyclePlaceholder("正在等待新的周额度读数")
+        VStack(alignment: .leading, spacing: 8) {
+            if let cycle = currentCycle(tool) {
+                Card(tint: cycleTint(tool)) { cycleCard(cycle) }
+            }
+            let past = completedCycles(tool)
+            if !past.isEmpty {
+                completedCyclesSection(tool, past)
             }
         }
     }
 
     /// 拿不到额度读数的工具 —— 周期切不出来,得告诉用户怎么把它找回来。
-    /// 账本里完全没用量的工具不提示(例如没用过 Claude)。
     private var missingTools: [String] {
-        (detail.payload?.missing ?? []).filter { hasLedgerUsage($0) }
-    }
-
-    private func hasLedgerUsage(_ tool: String) -> Bool {
-        guard let daily = detail.payload?.daily else { return false }
-        switch tool {
-        case "claude": return daily.contains { $0.c > 0 }
-        case "codex": return daily.contains { $0.x > 0 }
-        case "grok": return daily.contains { $0.g > 0 }
-        case "kimi": return daily.contains { $0.k > 0 }
-        default: return false
-        }
+        detail.payload?.missing ?? []
     }
 
     private func missingHint(_ tool: String) -> String {
@@ -305,50 +210,58 @@ struct QuotaHistoryView: View {
                 + "打开一次桌面版并进入 Settings › Usage，约十分钟后这里就会出现。"
         case "grok":
             return "Grok 还没有周额度卡片：登录一次 grok.com 让 Tokei 抓到额度读数。"
-        case "kimi":
-            return "Kimi 还没有周额度卡片：登录一次 Kimi Code 让 Tokei 抓到官方周额度读数。"
         default:
             return "Codex 还没有周额度卡片：跑一次 codex 让它刷新额度读数。"
         }
     }
 
     private func cycleCard(_ cycle: QuotaCycle) -> some View {
-        VStack(alignment: .leading, spacing: 11) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("\(cycleName(cycle.tool)) 周额度")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(cycleTint(cycle.tool))
                 Spacer()
-                Text("\(Fmt.reset(cycle.end)) 回满 · \(Fmt.countdown(cycle.end))")
+                Text("\(Fmt.countdown(cycle.end)) 后回满")
                     .font(.system(size: 9.5))
                     .foregroundStyle(Theme.tTertiary)
             }
             if let used = cycle.used_pct {
                 cycleProgress(used, tint: cycleTint(cycle.tool))
             }
-            HStack(alignment: .top, spacing: 18) {
-                cycleMetric(
-                    "已用额度",
-                    cycle.used_pct.map { String(format: "%.0f%%", $0) } ?? "—",
-                    cycleTint(cycle.tool)
-                )
-                cycleMetric(
-                    "对应消耗",
-                    (cycle.approx ? "≈" : "") + Fmt.human(cycle.tokens),
-                    Theme.tPrimary,
-                    detail: Fmt.grouped(cycle.tokens)
-                )
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("这个周期已经用了")
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Theme.tTertiary)
+                    HStack(alignment: .firstTextBaseline, spacing: 7) {
+                        Text((cycle.approx ? "≈" : "") + Fmt.human(cycle.tokens))
+                            .font(.system(size: 25, weight: .bold, design: .rounded))
+                            .foregroundStyle(Theme.tPrimary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                        Text("tokens")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.tTertiary)
+                    }
+                    Text(Fmt.grouped(cycle.tokens))
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                }
+                Spacer()
                 if let projected = cycle.projectedTotal {
-                    cycleMetric("满额折算", Fmt.human(projected), Theme.tSecondary)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("照这个用法，整个周期约")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(Theme.tTertiary)
+                        Text(Fmt.human(projected))
+                            .font(.system(size: 17, weight: .bold, design: .rounded))
+                            .foregroundStyle(Theme.tSecondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                    }
                 }
             }
-            let pace = paceText(cycle)
-            Text(pace.text)
-                .font(.system(size: 10.5, weight: .semibold))
-                .foregroundStyle(pace.color)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(pace.color.opacity(0.10)))
             if cycle.deviceBreakdown.count > 1 {
                 Text(cycle.deviceBreakdown
                         .map { "\($0.name) \(Fmt.human($0.tokens))" }
@@ -359,53 +272,6 @@ struct QuotaHistoryView: View {
                     .minimumScaleFactor(0.7)
             }
         }
-    }
-
-    private func cycleMetric(
-        _ title: String,
-        _ value: String,
-        _ tint: Color,
-        detail: String? = nil
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.system(size: 9.5))
-                .foregroundStyle(Theme.tTertiary)
-            Text(value)
-                .font(.system(size: 21, weight: .bold, design: .rounded))
-                .foregroundStyle(tint)
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
-            if let detail {
-                Text(detail)
-                    .font(.system(size: 8.5, design: .monospaced))
-                    .foregroundStyle(Theme.tTertiary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func paceText(_ cycle: QuotaCycle) -> (text: String, color: Color) {
-        guard let used = cycle.used_pct else {
-            return ("额度刷新后显示节奏预测", Theme.tTertiary)
-        }
-        if used < QuotaPace.minUsedPercent {
-            return ("用量尚少，达到 3% 后显示节奏预测", Theme.tTertiary)
-        }
-        guard let now = detail.payload?.now, let pace = cycle.paceForecast(now: now) else {
-            return ("周期开始满 1 小时后显示节奏预测", Theme.tTertiary)
-        }
-        if pace.willExhaustBeforeReset {
-            return (
-                String(format: "按当前节奏，预计 %.1f 天后额度见底", pace.daysUntilEmpty),
-                Color.orange.opacity(0.95)
-            )
-        }
-        return (
-            String(format: "按当前节奏，回满时预计剩余 %.0f%%", max(pace.remainingAtReset, 0)),
-            Theme.tSecondary
-        )
     }
 
     private func cycleProgress(_ used: Double, tint: Color) -> some View {
@@ -428,11 +294,55 @@ struct QuotaHistoryView: View {
         }
     }
 
+    private func completedCyclesSection(_ tool: String, _ cycles: [QuotaCycle]) -> some View {
+        let peak = max(cycles.map(\.tokens).max() ?? 1, 1)
+        let uneven = cycles.contains { $0.durationDays < 6.5 }
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("\(cycleName(tool)) 过去几个周期")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.tSecondary)
+            if uneven {
+                Text("不足 7 天的是重置时间被提前重锚，额度提前回满，长度不一样不能直接比。")
+                    .font(.system(size: 9))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(cycles.prefix(8)) { cycle in
+                HStack(spacing: 8) {
+                    Text("\(Fmt.day(cycle.start)) → \(Fmt.day(cycle.end))")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .frame(width: 92, alignment: .leading)
+                    Text(String(format: "%.1f天", cycle.durationDays))
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .frame(width: 38, alignment: .trailing)
+                    GeometryReader { geometry in
+                        Capsule()
+                            .fill(cycleTint(tool).opacity(0.55))
+                            .frame(
+                                width: geometry.size.width
+                                    * CGFloat(cycle.tokens) / CGFloat(peak)
+                            )
+                    }
+                    .frame(height: 7)
+                    Text((cycle.approx ? "≈" : "") + Fmt.human(cycle.tokens))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.tSecondary)
+                        .frame(width: 52, alignment: .trailing)
+                    Text(cycle.used_pct.map { String(format: "用到%.0f%%", $0) } ?? "—")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .frame(width: 52, alignment: .trailing)
+                }
+            }
+        }
+    }
+
     private func cycleName(_ tool: String) -> String {
         switch tool {
         case "claude": return "Claude"
         case "grok": return "Grok"
-        case "kimi": return "Kimi"
         default: return "Codex"
         }
     }
@@ -441,7 +351,6 @@ struct QuotaHistoryView: View {
         switch tool {
         case "claude": return Theme.claude
         case "grok": return Theme.grok
-        case "kimi": return Theme.kimi
         default: return Theme.codex
         }
     }
@@ -464,15 +373,13 @@ struct QuotaHistoryView: View {
         let claude = points.reduce(0) { $0 + $1.c }
         let codex = points.reduce(0) { $0 + $1.x }
         let grok = points.reduce(0) { $0 + $1.g }
-        let kimi = points.reduce(0) { $0 + $1.k }
         return Card(tint: Theme.codex) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 12) {
                     dailyStat("Claude", claude, Theme.claude)
                     dailyStat("Codex", codex, Theme.codex)
                     dailyStat("Grok", grok, Theme.grok)
-                    dailyStat("Kimi", kimi, Theme.kimi)
-                    dailyStat("合计", claude + codex + grok + kimi, Theme.tPrimary)
+                    dailyStat("合计", claude + codex + grok, Theme.tPrimary)
                 }
                 if points.isEmpty {
                     dailyEmpty
@@ -535,14 +442,14 @@ struct QuotaHistoryView: View {
                     .foregroundStyle(Theme.tTertiary)
             }
             Spacer()
-            if !span.showsDailyTokens, visibleTools.count >= 2 {
+            if !span.showsDailyTokens {
                 Picker("", selection: $tool) {
-                    ForEach(visibleTools) { tool in
-                        Text(tool.pickerLabel).tag(tool)
+                    ForEach(QuotaHistoryTool.allCases) { tool in
+                        Text(tool.rawValue).tag(tool)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: CGFloat(min(70 * visibleTools.count, 280)))
+                .frame(width: 216)
                 .controlSize(.mini)
             }
             Picker("", selection: $span) {
@@ -720,8 +627,6 @@ struct QuotaHistoryView: View {
             return Color(red: 1.00, green: 0.72, blue: 0.16)
         case (.codex, "周"):
             return Theme.codex
-        case (.grok, "周"):
-            return Theme.grok
         default:
             return tool.tint
         }
@@ -764,7 +669,6 @@ private struct QuotaDailyChart: View {
                 Bar(day: day, tool: "Claude", tokens: point.c),
                 Bar(day: day, tool: "Codex", tokens: point.x),
                 Bar(day: day, tool: "Grok", tokens: point.g),
-                Bar(day: day, tool: "Kimi", tokens: point.k),
             ]
         }
     }
@@ -778,8 +682,8 @@ private struct QuotaDailyChart: View {
             .foregroundStyle(by: .value("工具", bar.tool))
         }
         .chartForegroundStyleScale(
-            domain: ["Claude", "Codex", "Grok", "Kimi"],
-            range: [Theme.claude, Theme.codex, Theme.grok, Theme.kimi]
+            domain: ["Claude", "Codex", "Grok"],
+            range: [Theme.claude, Theme.codex, Theme.grok]
         )
         .chartLegend(position: .top, alignment: .trailing, spacing: 10)
         .chartXAxis {
@@ -847,7 +751,6 @@ private struct QuotaDailyChart: View {
             hoverRow("Claude", point.c, Theme.claude)
             hoverRow("Codex", point.x, Theme.codex)
             hoverRow("Grok", point.g, Theme.grok)
-            hoverRow("Kimi", point.k, Theme.kimi)
             Text("合计 \(Fmt.grouped(point.total))")
                 .font(.system(size: 8.5, design: .monospaced))
                 .foregroundStyle(Theme.tTertiary)

@@ -20,5 +20,5 @@ if [ ! -f "$DMG_PATH" ]; then
 fi
 
 SHA256="$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')"
-printf '{\n  "tag_name": "v%s",\n  "download_url": "https://github.com/lipf6/tokei/releases/download/v%s/Tokei.dmg",\n  "sha256": "%s"\n}\n' \
+printf '{\n  "tag_name": "v%s",\n  "download_url": "https://dl.lanshuagent.com/tokei/Tokei-v%s.dmg",\n  "sha256": "%s"\n}\n' \
     "$VERSION" "$VERSION" "$SHA256" > "$OUTPUT_PATH"

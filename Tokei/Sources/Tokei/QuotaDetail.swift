@@ -7,21 +7,9 @@ struct QuotaDailyPoint: Codable, Identifiable {
     var c: Int
     var x: Int
     var g: Int
-    var k: Int = 0
 
     var id: String { d }
-    var total: Int { c + x + g + k }
-
-    enum CodingKeys: String, CodingKey { case d, c, x, g, k }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        d = try container.decode(String.self, forKey: .d)
-        c = try container.decode(Int.self, forKey: .c)
-        x = try container.decode(Int.self, forKey: .x)
-        g = try container.decode(Int.self, forKey: .g)
-        k = try container.decodeIfPresent(Int.self, forKey: .k) ?? 0
-    }
+    var total: Int { c + x + g }
 }
 
 /// 一个周额度周期 = 两次「余量 100%」之间。token 已合并所有设备。
@@ -50,11 +38,6 @@ struct QuotaCycle: Codable, Identifiable {
         devices.filter { $0.value > 0 }
             .sorted { $0.value > $1.value }
             .map { (name: $0.key, tokens: $0.value) }
-    }
-
-    func paceForecast(now: Int) -> QuotaPaceForecast? {
-        guard current, let used = used_pct else { return nil }
-        return QuotaPace.forecast(usedPercent: used, start: start, end: end, now: now)
     }
 }
 

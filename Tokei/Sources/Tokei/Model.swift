@@ -188,6 +188,9 @@ struct GeminiRange: Codable {
     var cost: Double
     var models: [GeminiModelStat] = []
     var sessions: Int = 0
+
+    var totalTokens: Int { self.in + out + cached + thoughts }
+    var hasUsage: Bool { sessions > 0 || totalTokens > 0 }
 }
 
 struct GeminiRanges: Codable {
@@ -198,6 +201,35 @@ struct GeminiRanges: Codable {
     var month: GeminiRange
     var year: GeminiRange
     var all: GeminiRange?
+
+    /// A zero-activity selected range should not hide a recent local session.
+    /// Return the nearest useful range together with its real label so the UI
+    /// never presents yesterday/week data as today's data.
+    func displayRange(for preferred: RangeKey) -> (range: GeminiRange, key: RangeKey) {
+        let order: [RangeKey]
+        switch preferred {
+        case .today:
+            order = [.today, .yesterday, .week, .month, .year, .all]
+        case .yesterday:
+            order = [.yesterday, .today, .week, .month, .year, .all]
+        case .week:
+            order = [.week, .today, .yesterday, .month, .year, .all]
+        case .lastWeek:
+            order = [.lastWeek, .week, .month, .year, .all, .today, .yesterday]
+        case .month:
+            order = [.month, .year, .all, .week, .today, .yesterday]
+        case .year:
+            order = [.year, .all, .month, .week, .today, .yesterday]
+        case .all:
+            order = [.all, .year, .month, .week, .today, .yesterday]
+        }
+        for key in order {
+            let candidate = get(key)
+            if candidate.hasUsage { return (candidate, key) }
+        }
+        return (get(preferred), preferred)
+    }
+
     func get(_ k: RangeKey) -> GeminiRange {
         switch k {
         case .today: return today; case .yesterday: return yesterday
@@ -507,7 +539,9 @@ struct HermesRange: Codable {
     var models: [TokenModelStat] = []
 }
 struct TokenModelStat: Codable, Identifiable {
+    var modelId: String?
     var name: String
+    var tokens: Int?
     var `in`: Int
     var out: Int
     var cr: Int = 0
@@ -516,11 +550,13 @@ struct TokenModelStat: Codable, Identifiable {
     var cost: Double
     var pin: Double = 0
     var pout: Double = 0
-    var id: String { name }
+    var id: String { modelId ?? name }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        modelId = try c.decodeIfPresent(String.self, forKey: .modelId)
         name = try c.decode(String.self, forKey: .name)
+        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens)
         `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
         cr = try c.decodeIfPresent(Int.self, forKey: .cr) ?? 0
@@ -529,6 +565,11 @@ struct TokenModelStat: Codable, Identifiable {
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
         pin = try c.decodeIfPresent(Double.self, forKey: .pin) ?? 0
         pout = try c.decodeIfPresent(Double.self, forKey: .pout) ?? 0
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelId = "model_id"
+        case name, tokens, `in`, out, cr, cw, reason, cost, pin, pout
     }
 }
 struct HermesRanges: Codable {
@@ -604,6 +645,7 @@ struct OpenClawRanges: Codable {
 struct OpenClawStat: Codable { var ranges: OpenClawRanges }
 
 struct TokenUsageRange: Codable {
+    var tokens: Int
     var hit: Double
     var `in`: Int
     var out: Int
@@ -611,11 +653,24 @@ struct TokenUsageRange: Codable {
     var cw: Int
     var reason: Int
     var cost: Double
+    var requests: Int
     var sessions: Int = 0
     var models: [TokenModelStat] = []
+    var coverage: String?
 
-    init(hit: Double = 0, `in` input: Int = 0, out: Int = 0, cr: Int = 0, cw: Int = 0,
-         reason: Int = 0, cost: Double = 0, sessions: Int = 0, models: [TokenModelStat] = []) {
+    var totalTokens: Int {
+        tokens > 0 ? tokens : `in` + out + cr + cw + reason
+    }
+
+    var hasComponents: Bool {
+        `in` + out + cr + cw + reason > 0
+    }
+
+    init(tokens: Int = 0, hit: Double = 0, `in` input: Int = 0, out: Int = 0,
+         cr: Int = 0, cw: Int = 0, reason: Int = 0, cost: Double = 0,
+         requests: Int = 0, sessions: Int = 0, models: [TokenModelStat] = [],
+         coverage: String? = nil) {
+        self.tokens = tokens
         self.hit = hit
         self.in = input
         self.out = out
@@ -623,12 +678,15 @@ struct TokenUsageRange: Codable {
         self.cw = cw
         self.reason = reason
         self.cost = cost
+        self.requests = requests
         self.sessions = sessions
         self.models = models
+        self.coverage = coverage
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        tokens = try c.decodeIfPresent(Int.self, forKey: .tokens) ?? 0
         hit = try c.decodeIfPresent(Double.self, forKey: .hit) ?? 0
         `in` = try c.decodeIfPresent(Int.self, forKey: .in) ?? 0
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
@@ -636,8 +694,10 @@ struct TokenUsageRange: Codable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        requests = try c.decodeIfPresent(Int.self, forKey: .requests) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
+        coverage = try c.decodeIfPresent(String.self, forKey: .coverage)
     }
 }
 struct TokenUsageRanges: Codable {
@@ -666,6 +726,7 @@ struct TokenUsageRanges: Codable {
 }
 struct TokenUsageStat: Codable { var ranges: TokenUsageRanges }
 
+/// Kimi 官方额度的一行窗口（周额度或 5 小时额度）。
 struct KimiQuotaRow: Codable, Identifiable {
     var name: String?
     var duration: Int?
@@ -681,6 +742,7 @@ struct KimiQuotaRow: Codable, Identifiable {
     }
 }
 
+/// Kimi Extra Usage 钱包余额与月度上限。
 struct KimiExtraUsage: Codable {
     var balance_cents: Int
     var total_cents: Int
@@ -690,9 +752,8 @@ struct KimiExtraUsage: Codable {
     var currency: String
 }
 
+/// Kimi Code 用量 + 官方额度（额度字段全部可选，兼容只报本地用量的旧输出）。
 struct KimiStat: Codable {
-    private static let persistentQuotaTTL = 5 * 60
-
     var ranges: TokenUsageRanges
     var weekly: KimiQuotaRow?
     var limits: [KimiQuotaRow]
@@ -725,16 +786,164 @@ struct KimiStat: Codable {
         q_error = try c.decodeIfPresent(String.self, forKey: .q_error)
     }
 
-    /// 将磁盘快照中的额度标记为缓存来源，并按更新时间和重置时间重新判断有效性。
+    /// 从磁盘快照读回的额度不再是实时数据：来源改记为缓存，
+    /// 并按更新时间（与 Python 端一致的 5 分钟 TTL）和各窗口重置时间重判过期；
+    /// 只加过期标记，不清除 Python 已标的 stale。
     mutating func normalizePersistentQuota(now: Date = Date()) {
-        let nowEpoch = Int(now.timeIntervalSince1970)
-        let updated = q_updated ?? 0
-        let sourceStale = updated <= 0 || updated > nowEpoch ||
-            nowEpoch - updated > Self.persistentQuotaTTL
-        let resetExpired = weekly?.reset_at.map { $0 <= nowEpoch } == true ||
-            limits.contains { row in row.reset_at.map { $0 <= nowEpoch } == true }
-        q_source = "cache"
-        q_stale = sourceStale || resetExpired
+        let epoch = Int(now.timeIntervalSince1970)
+        if q_source == "live" { q_source = "cache" }
+        var expired = false
+        if let updated = q_updated {
+            expired = updated > epoch || epoch - updated > 300
+        } else {
+            expired = true
+        }
+        if let reset = weekly?.reset_at, reset <= epoch { expired = true }
+        if limits.contains(where: { ($0.reset_at ?? .max) <= epoch }) { expired = true }
+        q_stale = (q_stale == true) || expired
+    }
+}
+
+/// A single quota bucket reported by the QwenWork desktop app.
+/// `total == 0` does not imply that the bucket is empty: some plans expose
+/// only an absolute remaining-credit balance.
+struct QwenWorkQuotaSegment: Codable, Identifiable {
+    var id = ""
+    var kind = ""
+    var total: Double?
+    var used: Double?
+    var remaining: Double?
+    var percentage_used: Double?
+    var unit: String?
+    var renews_at: Int?
+    var expires_at: Int?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
+        total = try? c.decodeIfPresent(Double.self, forKey: .total)
+        used = try? c.decodeIfPresent(Double.self, forKey: .used)
+        remaining = try? c.decodeIfPresent(Double.self, forKey: .remaining)
+        percentage_used = try? c.decodeIfPresent(Double.self, forKey: .percentage_used)
+        unit = try? c.decodeIfPresent(String.self, forKey: .unit)
+        renews_at = try? c.decodeIfPresent(Int.self, forKey: .renews_at)
+        expires_at = try? c.decodeIfPresent(Int.self, forKey: .expires_at)
+    }
+}
+
+/// A team/shared package is displayed separately and never added to the
+/// personal credit balance.
+struct QwenWorkSharedQuota: Codable {
+    var total: Double?
+    var used: Double?
+    var remaining: Double?
+    var percentage_used: Double?
+    var unit: String?
+    var expires_at: Int?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        total = try? c.decodeIfPresent(Double.self, forKey: .total)
+        used = try? c.decodeIfPresent(Double.self, forKey: .used)
+        remaining = try? c.decodeIfPresent(Double.self, forKey: .remaining)
+        percentage_used = try? c.decodeIfPresent(Double.self, forKey: .percentage_used)
+        unit = try? c.decodeIfPresent(String.self, forKey: .unit)
+        expires_at = try? c.decodeIfPresent(Int.self, forKey: .expires_at)
+    }
+}
+
+struct QwenWorkQuota: Codable {
+    var available = false
+    var remaining: Double?
+    var remaining_pct: Double?
+    var exceeded = false
+    var is_team = false
+    var expires_at: Int?
+    var plan_expiration: Int?
+    var segments: [QwenWorkQuotaSegment] = []
+    var shared: QwenWorkSharedQuota?
+    var source: String?
+    var updated: Int?
+    var stale = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = (try? c.decodeIfPresent(Bool.self, forKey: .available)) ?? false
+        remaining = try? c.decodeIfPresent(Double.self, forKey: .remaining)
+        remaining_pct = try? c.decodeIfPresent(Double.self, forKey: .remaining_pct)
+        exceeded = (try? c.decodeIfPresent(Bool.self, forKey: .exceeded)) ?? false
+        is_team = (try? c.decodeIfPresent(Bool.self, forKey: .is_team)) ?? false
+        expires_at = try? c.decodeIfPresent(Int.self, forKey: .expires_at)
+        plan_expiration = try? c.decodeIfPresent(Int.self, forKey: .plan_expiration)
+        segments = (try? c.decodeIfPresent([QwenWorkQuotaSegment].self, forKey: .segments)) ?? []
+        shared = try? c.decodeIfPresent(QwenWorkSharedQuota.self, forKey: .shared)
+        source = try? c.decodeIfPresent(String.self, forKey: .source)
+        updated = try? c.decodeIfPresent(Int.self, forKey: .updated)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
+    }
+}
+
+struct ProviderQuotaWindow: Codable, Identifiable {
+    var id = ""
+    var title = ""
+    var used_pct: Double?
+    var reset: Int?
+    var window_minutes: Int?
+    var detail: String?
+    var usage_known = true
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? id
+        used_pct = try? c.decodeIfPresent(Double.self, forKey: .used_pct)
+        reset = try? c.decodeIfPresent(Int.self, forKey: .reset)
+        window_minutes = try? c.decodeIfPresent(Int.self, forKey: .window_minutes)
+        detail = try? c.decodeIfPresent(String.self, forKey: .detail)
+        usage_known = (try? c.decodeIfPresent(Bool.self, forKey: .usage_known)) ?? true
+    }
+}
+
+struct ProviderQuotaDetail: Codable {
+    var label = ""
+    var value = ""
+    var secondary: String?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        label = try c.decodeIfPresent(String.self, forKey: .label) ?? ""
+        value = try c.decodeIfPresent(String.self, forKey: .value) ?? ""
+        secondary = try? c.decodeIfPresent(String.self, forKey: .secondary)
+    }
+}
+
+struct ProviderQuotaStat: Codable {
+    var available = false
+    var plan: String?
+    var account: String?
+    var windows: [ProviderQuotaWindow] = []
+    var details: [ProviderQuotaDetail] = []
+    var usage: TokenUsageStat? = nil
+    var source: String?
+    var updated: Int?
+    var stale = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        available = (try? c.decodeIfPresent(Bool.self, forKey: .available)) ?? false
+        plan = try? c.decodeIfPresent(String.self, forKey: .plan)
+        account = try? c.decodeIfPresent(String.self, forKey: .account)
+        windows = (try? c.decodeIfPresent([ProviderQuotaWindow].self, forKey: .windows)) ?? []
+        details = (try? c.decodeIfPresent([ProviderQuotaDetail].self, forKey: .details)) ?? []
+        usage = try? c.decodeIfPresent(TokenUsageStat.self, forKey: .usage)
+        source = try? c.decodeIfPresent(String.self, forKey: .source)
+        updated = try? c.decodeIfPresent(Int.self, forKey: .updated)
+        stale = (try? c.decodeIfPresent(Bool.self, forKey: .stale)) ?? false
     }
 }
 
@@ -751,14 +960,23 @@ struct Usage: Codable {
     var mimocode: TokenUsageStat
     var openclaw: OpenClawStat
     var pi: TokenUsageStat
+    var prime_agent: TokenUsageStat
     var workbuddy: TokenUsageStat
+    var deepseekHarness: TokenUsageStat
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
-    var kimi: KimiStat
+    var qwenwork: QwenWorkQuota
+    var kimicode: KimiStat
+    var antigravity: ProviderQuotaStat
+    var cursor: ProviderQuotaStat
+    var zed: ProviderQuotaStat
+    var sub2api: ProviderQuotaStat
+    var zai: ProviderQuotaStat
 
     enum CodingKeys: String, CodingKey {
         case claude, codex, gemini, grok, qoder, qoderwork, qodercli, hermes, zcode, mimocode
-        case openclaw, pi, workbuddy, opencode, qwencode, kimi
+        case openclaw, pi, workbuddy, deepseekHarness = "deepseek_harness", opencode, qwencode
+        case qwenwork, kimicode, prime_agent, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -779,14 +997,31 @@ struct Usage: Codable {
         mimocode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .mimocode) ?? TokenUsageStat(ranges: .empty)
         openclaw = try c.decode(OpenClawStat.self, forKey: .openclaw)
         pi = try c.decodeIfPresent(TokenUsageStat.self, forKey: .pi) ?? TokenUsageStat(ranges: .empty)
+        prime_agent = try c.decodeIfPresent(TokenUsageStat.self, forKey: .prime_agent) ?? TokenUsageStat(ranges: .empty)
         workbuddy = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddy) ?? TokenUsageStat(ranges: .empty)
+        deepseekHarness = try c.decodeIfPresent(TokenUsageStat.self, forKey: .deepseekHarness) ?? TokenUsageStat(ranges: .empty)
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
-        kimi = try c.decodeIfPresent(KimiStat.self, forKey: .kimi) ?? KimiStat(ranges: .empty)
+        qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
+        kimicode = try c.decodeIfPresent(KimiStat.self, forKey: .kimicode) ?? KimiStat(ranges: .empty)
+        antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
+        cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
+        zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()
+        sub2api = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .sub2api) ?? ProviderQuotaStat()
+        zai = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zai) ?? ProviderQuotaStat()
     }
 }
 
 enum Fmt {
+    static func credits(_ n: Double) -> String {
+        if abs(n.rounded() - n) < 0.000_001 {
+            return String(format: "%.0f", n)
+        }
+        return String(format: "%.2f", n)
+            .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\.$", with: "", options: .regularExpression)
+    }
+
     static func human(_ n: Int) -> String {
         let v = Double(n)
         if v >= 100_000_000 { return String(format: "%.1f亿", v / 100_000_000) }
@@ -832,17 +1067,8 @@ enum Fmt {
         guard let e = epoch else { return "?" }
         let s = TimeInterval(e) - Date().timeIntervalSince1970
         if s <= 0 { return "即将重置" }
-        let totalMinutes = Int(s) / 60
-        let days = totalMinutes / (24 * 60)
-        let hours = totalMinutes / 60 % 24
-        let minutes = totalMinutes % 60
-        if days > 0 {
-            return hours > 0 ? "\(days)天\(hours)小时" : "\(days)天"
-        }
-        if hours > 0 {
-            return minutes > 0 ? "\(hours)小时\(minutes)分钟" : "\(hours)小时"
-        }
-        return minutes > 0 ? "\(minutes)分钟" : "不到1分钟"
+        let h = Int(s) / 3600, m = (Int(s) % 3600) / 60
+        return h > 0 ? "\(h)h\(m)m" : "\(m)m"
     }
 
     static func duration(_ ms: Int) -> String {
