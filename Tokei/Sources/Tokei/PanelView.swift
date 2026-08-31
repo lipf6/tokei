@@ -1538,7 +1538,10 @@ struct PanelView: View {
                 if !r.models.isEmpty {
                     tokenModelDisclosure(r.models, open: $kimiCodeModelsOpen, tint: Theme.kimicode)
                 }
-            } else if !hasQuota {
+            } else if hasQuota {
+                // 所选周期无用量但有额度时，先说明额度展示的是最新状态而非该周期用量
+                usageEmptyHint
+            } else {
                 emptyHint
             }
             if hasQuota {
