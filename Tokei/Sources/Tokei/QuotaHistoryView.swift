@@ -2,7 +2,13 @@ import Charts
 import SwiftUI
 
 private extension QuotaHistoryTool {
-    var tint: Color { self == .claude ? Theme.claude : Theme.codex }
+    var tint: Color {
+        switch self {
+        case .claude: return Theme.claude
+        case .codex: return Theme.codex
+        case .kimi: return Theme.kimicode
+        }
+    }
 }
 
 private enum QuotaHistorySpan: Int, CaseIterable, Identifiable {
@@ -443,7 +449,7 @@ struct QuotaHistoryView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 132)
+                .frame(width: 216)
                 .controlSize(.mini)
             }
             Picker("", selection: $span) {

@@ -726,6 +726,84 @@ struct TokenUsageRanges: Codable {
 }
 struct TokenUsageStat: Codable { var ranges: TokenUsageRanges }
 
+/// Kimi 官方额度的一行窗口（周额度或 5 小时额度）。
+struct KimiQuotaRow: Codable, Identifiable {
+    var name: String?
+    var duration: Int?
+    var unit: String?
+    var used: Double
+    var limit: Double
+    var reset_at: Int?
+
+    var id: String { "\(name ?? "quota"):\(duration ?? 0):\(unit ?? "")" }
+    var usedPercent: Double? {
+        guard limit > 0 else { return nil }
+        return min(100, max(0, used / limit * 100))
+    }
+}
+
+/// Kimi Extra Usage 钱包余额与月度上限。
+struct KimiExtraUsage: Codable {
+    var balance_cents: Int
+    var total_cents: Int
+    var monthly_limit_enabled: Bool
+    var monthly_limit_cents: Int
+    var monthly_used_cents: Int
+    var currency: String
+}
+
+/// Kimi Code 用量 + 官方额度（额度字段全部可选，兼容只报本地用量的旧输出）。
+struct KimiStat: Codable {
+    var ranges: TokenUsageRanges
+    var weekly: KimiQuotaRow?
+    var limits: [KimiQuotaRow]
+    var extra_usage: KimiExtraUsage?
+    var q_updated: Int?
+    var q_source: String?
+    var q_stale: Bool?
+    var q_error: String?
+
+    init(ranges: TokenUsageRanges) {
+        self.ranges = ranges
+        weekly = nil
+        limits = []
+        extra_usage = nil
+        q_updated = nil
+        q_source = nil
+        q_stale = nil
+        q_error = nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ranges = try c.decodeIfPresent(TokenUsageRanges.self, forKey: .ranges) ?? .empty
+        weekly = try c.decodeIfPresent(KimiQuotaRow.self, forKey: .weekly)
+        limits = try c.decodeIfPresent([KimiQuotaRow].self, forKey: .limits) ?? []
+        extra_usage = try c.decodeIfPresent(KimiExtraUsage.self, forKey: .extra_usage)
+        q_updated = try c.decodeIfPresent(Int.self, forKey: .q_updated)
+        q_source = try c.decodeIfPresent(String.self, forKey: .q_source)
+        q_stale = try c.decodeIfPresent(Bool.self, forKey: .q_stale)
+        q_error = try c.decodeIfPresent(String.self, forKey: .q_error)
+    }
+
+    /// 从磁盘快照读回的额度不再是实时数据：来源改记为缓存，
+    /// 并按更新时间（与 Python 端一致的 5 分钟 TTL）和各窗口重置时间重判过期；
+    /// 只加过期标记，不清除 Python 已标的 stale。
+    mutating func normalizePersistentQuota(now: Date = Date()) {
+        let epoch = Int(now.timeIntervalSince1970)
+        if q_source == "live" { q_source = "cache" }
+        var expired = false
+        if let updated = q_updated {
+            expired = updated > epoch || epoch - updated > 300
+        } else {
+            expired = true
+        }
+        if let reset = weekly?.reset_at, reset <= epoch { expired = true }
+        if limits.contains(where: { ($0.reset_at ?? .max) <= epoch }) { expired = true }
+        q_stale = (q_stale == true) || expired
+    }
+}
+
 /// A single quota bucket reported by the QwenWork desktop app.
 /// `total == 0` does not imply that the bucket is empty: some plans expose
 /// only an absolute remaining-credit balance.
@@ -888,7 +966,7 @@ struct Usage: Codable {
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
     var qwenwork: QwenWorkQuota
-    var kimicode: TokenUsageStat
+    var kimicode: KimiStat
     var antigravity: ProviderQuotaStat
     var cursor: ProviderQuotaStat
     var zed: ProviderQuotaStat
@@ -925,7 +1003,7 @@ struct Usage: Codable {
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
-        kimicode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .kimicode) ?? TokenUsageStat(ranges: .empty)
+        kimicode = try c.decodeIfPresent(KimiStat.self, forKey: .kimicode) ?? KimiStat(ranges: .empty)
         antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
         cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
         zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()

@@ -501,16 +501,19 @@ final class DataLoader {
                 raw["claude"] = claude
             }
             guard let cleaned = try? JSONSerialization.data(withJSONObject: raw),
-                  let usage = try? JSONDecoder().decode(Usage.self, from: cleaned)
+                  var usage = try? JSONDecoder().decode(Usage.self, from: cleaned)
             else { continue }
+            usage.kimicode.normalizePersistentQuota()
             return usage
         }
         return nil
     }
 
-    static func load(_ completion: @escaping (Usage?) -> Void) {
+    static func load(forceKimiQuota: Bool = false, _ completion: @escaping (Usage?) -> Void) {
         DispatchQueue.global(qos: .utility).async {
-            let usage = runScript()
+            var args = ["--json", "--no-sync-snapshot"]
+            if forceKimiQuota { args.append("--force-kimi-quota") }
+            let usage = runScript(args: args)
             DispatchQueue.main.async { completion(usage) }
         }
     }

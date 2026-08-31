@@ -70,6 +70,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     case codex5h
     case codexWeek
     case grok
+    case kimi
 
     var id: String { rawValue }
 
@@ -81,6 +82,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .codex5h: return "Codex 5h"
         case .codexWeek: return "Codex 周"
         case .grok: return "Grok"
+        case .kimi: return "Kimi 周"
         }
     }
 
@@ -93,6 +95,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .codex5h: return "menuBarQuotaCodex5h"
         case .codexWeek: return "menuBarQuotaCodex"
         case .grok: return "menuBarQuotaGrok"
+        case .kimi: return "menuBarQuotaKimi"
         }
     }
 
@@ -100,7 +103,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     var defaultEnabled: Bool {
         switch self {
         case .claude5h, .codexWeek: return true
-        case .claudeWeek, .claudeFable, .codex5h, .grok: return false
+        case .claudeWeek, .claudeFable, .codex5h, .grok, .kimi: return false
         }
     }
 
@@ -114,7 +117,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     var window: MenuBarQuotaWindow? {
         switch self {
         case .claude5h, .codex5h: return .fiveHour
-        case .claudeWeek, .claudeFable, .codexWeek: return .week
+        case .claudeWeek, .claudeFable, .codexWeek, .kimi: return .week
         case .grok: return nil
         }
     }
@@ -126,6 +129,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claudeFable: return .systemOrange
         case .codex5h, .codexWeek: return AppDelegate.codexColor
         case .grok: return AppDelegate.grokColor
+        case .kimi: return AppDelegate.kimiColor
         }
     }
 
@@ -135,6 +139,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claudeFable: return .orange
         case .codex5h, .codexWeek: return Theme.codex
         case .grok: return Theme.grok
+        case .kimi: return Theme.kimicode
         }
     }
 
@@ -147,6 +152,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .codex5h: return (usage.codex.p5, usage.codex.p5_stale)
         case .codexWeek: return (usage.codex.pw, usage.codex.pw_stale)
         case .grok: return (usage.grok.pct, usage.grok.stale)
+        case .kimi: return (usage.kimicode.weekly?.usedPercent, usage.kimicode.q_stale)
         }
     }
 

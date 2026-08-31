@@ -49,7 +49,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **千问办公（QwenWork）** | 套餐与加购积分余额、团队共享资源包 |
 | **Qoder** | Token、调用次数、配额 |
 | **QoderWork** | Token、调用次数、配额 |
-| **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目 |
+| **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目、周/5 小时额度、Extra Usage |
 
 ## 功能一览
 
@@ -198,7 +198,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | 千问办公（QwenWork） | `~/.qwenworkcn/mcp-adaptor.config` + `.status.json` 文件元数据 + 官方桌面端 `127.0.0.1` MCP（默认关闭；需客户端运行且已登录） |
 | Qoder | `~/.qodo-ai/sessions/*.jsonl` |
 | QoderWork | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
-| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl` |
+| Kimi Code | `${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl`；兼容旧版 `${KIMI_SHARE_DIR:-~/.kimi}/sessions/*/*/wire.jsonl`；额度读取 `credentials/kimi-code.json` 并查询官方 `/usages` |
 | Qoder Desktop | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db` |
 | QoderWork | `~/Library/Application Support/QoderWork/data/agents.db` |
 | Qoder CLI | `~/.qoder/projects/**/*.jsonl` |

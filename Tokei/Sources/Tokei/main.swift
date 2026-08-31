@@ -32,6 +32,7 @@ final class Store: ObservableObject {
     private var retryCount = 0
     private var refreshInFlight = false
     private var refreshPending = false
+    private var forceKimiQuotaRefreshPending = false
     private var dashboardPrewarmStarted = false
 
     func applyDisplayMode(updateStatusTitle: Bool = true) {
@@ -58,17 +59,18 @@ final class Store: ObservableObject {
         lastUpdated = "缓存数据 · 后台更新中"
     }
 
-    func refresh() {
+    func refresh(forceKimiQuota: Bool = false) {
         if refreshInFlight {
             refreshPending = true
+            forceKimiQuotaRefreshPending = forceKimiQuotaRefreshPending || forceKimiQuota
             return
         }
         refreshInFlight = true
-        performRefresh()
+        performRefresh(forceKimiQuota: forceKimiQuota)
     }
 
-    private func performRefresh() {
-        DataLoader.load { [weak self] u in
+    private func performRefresh(forceKimiQuota: Bool = false) {
+        DataLoader.load(forceKimiQuota: forceKimiQuota) { [weak self] u in
             guard let self = self else { return }
             guard let local = u else {
                 let hadPendingRefresh = self.refreshPending
@@ -127,7 +129,9 @@ final class Store: ObservableObject {
     private func finishRefresh() {
         if refreshPending {
             refreshPending = false
-            performRefresh()
+            let forceKimiQuota = forceKimiQuotaRefreshPending
+            forceKimiQuotaRefreshPending = false
+            performRefresh(forceKimiQuota: forceKimiQuota)
         } else {
             refreshInFlight = false
         }
@@ -144,6 +148,15 @@ final class Store: ObservableObject {
             totals[model.name, default: 0] +=
                 model.in + model.out + model.cr + model.cw + model.reason
         }
+        let kimiRange = usage.kimicode.ranges.get(.today)
+        let kimiModels = kimiRange.models.reduce(into: [String: Int]()) { totals, model in
+            guard model.name != "合成" else { return }
+            totals[model.name, default: 0] +=
+                model.in + model.out + model.cr + model.cw + model.reason
+        }
+        let kimiFiveHour = usage.kimicode.limits.first {
+            $0.duration == 5 && $0.unit == "hour"
+        }
         quotaHistory.record(QuotaCapture(
             claudeFiveHourRemaining: usage.claude.q5_stale == true
                 ? nil : usage.claude.q5.map { 100 - $0 },
@@ -153,8 +166,13 @@ final class Store: ObservableObject {
                 ? nil : usage.claude.qf.map { 100 - $0 },
             codexWeekRemaining: usage.codex.pw_stale == true
                 ? nil : usage.codex.pw.map { 100 - $0 },
+            kimiFiveHourRemaining: usage.kimicode.q_stale == true
+                ? nil : kimiFiveHour?.usedPercent.map { 100 - $0 },
+            kimiWeekRemaining: usage.kimicode.q_stale == true
+                ? nil : usage.kimicode.weekly?.usedPercent.map { 100 - $0 },
             claudeModelTotals: claudeModels,
-            codexModelTotals: codexModels
+            codexModelTotals: codexModels,
+            kimiModelTotals: kimiModels
         ))
     }
 
@@ -233,10 +251,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var timer: Timer?
     var globalMouseMonitor: Any?
 
-    // 菜单栏额度颜色(与面板 Theme.claude/codex/grok 一致)。
+    // 菜单栏额度颜色（与面板对应 Theme 一致）。
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
     static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
+    static let kimiColor   = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -254,10 +273,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.animates = true
         popover.delegate = self
 
-        // 启动时先把 Qoder IDE / Grok / 千问办公额度开关落盘到 config.json,
+        // 启动时先把 Qoder IDE / Grok / Kimi / 千问办公额度开关落盘到 config.json,
         // 确保随后的 refresh() 触发的 Python 扫描能读到正确配置。
         PanelView.syncQoderIdeConfigOnLaunch()
         PanelView.syncGrokLiveQuotaConfigOnLaunch()
+        PanelView.syncKimiLiveQuotaConfigOnLaunch()
         PanelView.syncQwenWorkQuotaConfigOnLaunch()
         PanelView.syncProviderQuotaConfigOnLaunch()
         if var syncConfig = store.syncManager.config {
