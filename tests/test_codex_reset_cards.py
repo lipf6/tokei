@@ -49,6 +49,8 @@ class CodexResetCardsTests(unittest.TestCase):
             mock.patch.object(USAGE, "CODEX_AUTH", str(self.auth_path)),
             mock.patch.object(USAGE, "CODEX_RESET_CARDS_CACHE", str(self.cache_path)),
             mock.patch.object(USAGE, "_codex_is_custom_provider", return_value=False),
+            mock.patch.object(
+                USAGE, "_fetch_codex_reset_cards_via_app_server", return_value=None),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -103,6 +105,30 @@ class CodexResetCardsTests(unittest.TestCase):
         self.assertEqual(cards["count"], 2)
         self.assertEqual(len(cards["expires"]), 1)
 
+    def test_normalizes_official_app_server_response(self):
+        now = 1_785_000_000
+        payload = {
+            "availableCount": 2,
+            "credits": [
+                {"status": "available", "expiresAt": now + 600},
+                {"status": "available", "expiresAt": now + 1200},
+            ],
+        }
+
+        cards = USAGE._normalize_codex_reset_cards(payload, now)
+
+        self.assertEqual(cards["count"], 2)
+        self.assertEqual(cards["expires"], [now + 600, now + 1200])
+
+    def test_app_server_count_survives_without_detail_rows(self):
+        cards = USAGE._normalize_codex_reset_cards({
+            "availableCount": 2,
+            "credits": None,
+        }, 1_785_000_000)
+
+        self.assertEqual(cards["count"], 2)
+        self.assertEqual(cards["expires"], [])
+
     def test_cached_count_preserves_cards_without_expiration_details(self):
         now = 1_785_000_000
         cards = {
@@ -133,6 +159,26 @@ class CodexResetCardsTests(unittest.TestCase):
         )
         self.assertNotIn("private-id", self.cache_path.read_text())
         self.assertNotIn("private-user", self.cache_path.read_text())
+
+    def test_prefers_official_app_server_over_legacy_endpoint(self):
+        now = 1_785_000_000
+        app_server_cards = {
+            "count": 2,
+            "expires": [now + 600, now + 1200],
+            "updated": now,
+        }
+        opener = mock.Mock(side_effect=AssertionError("legacy endpoint should not run"))
+        with mock.patch.object(
+                USAGE, "_fetch_codex_reset_cards_via_app_server",
+                return_value=app_server_cards) as app_server, \
+                mock.patch("urllib.request.urlopen", opener):
+            cards = USAGE.fetch_codex_reset_cards(now_epoch=now)
+
+        self.assertEqual(cards, app_server_cards)
+        app_server.assert_called_once_with(now)
+        opener.assert_not_called()
+        state = json.loads(self.cache_path.read_text())
+        self.assertEqual(state["source"], "app_server")
 
     def test_empty_result_is_cached_for_one_day(self):
         now = 1_785_000_000

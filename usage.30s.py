@@ -1366,10 +1366,11 @@ _CODEX_QUOTA_FALLBACK_TTL = 300
 _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
 _CODEX_RESET_CARDS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
-_CODEX_RESET_CARDS_CACHE_VERSION = 2
+_CODEX_RESET_CARDS_CACHE_VERSION = 3
 _CODEX_RESET_CARDS_REFRESH_INTERVAL = 24 * 3600
 _CODEX_RESET_CARDS_RETRY_INTERVAL = 6 * 3600
 _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES = 256 * 1024
+_CODEX_APP_SERVER_TIMEOUT = 10
 
 
 def _atomic_write_json(path, data):
@@ -1655,24 +1656,36 @@ def fetch_codex_live_limits():
 
 
 def _normalize_codex_reset_cards(data, now_epoch):
-    if not isinstance(data, dict) or not isinstance(data.get("credits"), list):
+    if not isinstance(data, dict):
+        return None
+    credits = data.get("credits")
+    available_count = data.get("available_count", data.get("availableCount"))
+    count_is_known = isinstance(available_count, int) \
+        and not isinstance(available_count, bool) and available_count >= 0
+    if credits is None:
+        if not count_is_known:
+            return None
+        credits = []
+    elif not isinstance(credits, list):
         return None
     expires = []
-    for credit in data["credits"]:
+    for credit in credits:
         if not isinstance(credit, dict) or credit.get("status") != "available":
             continue
         if credit.get("is_supported_by_plan") is False:
             continue
-        expires_at = parse_ts(credit.get("expires_at") or "")
-        if expires_at is None:
-            continue
-        epoch = int(expires_at.timestamp())
+        value = credit.get("expires_at", credit.get("expiresAt"))
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            epoch = int(value)
+        else:
+            expires_at = parse_ts(value or "")
+            if expires_at is None:
+                continue
+            epoch = int(expires_at.timestamp())
         if epoch > now_epoch:
             expires.append(epoch)
     ordered = sorted(expires)
-    available_count = data.get("available_count", data.get("availableCount"))
-    if isinstance(available_count, int) and not isinstance(available_count, bool) \
-            and available_count >= 0:
+    if count_is_known:
         count = max(available_count, len(ordered))
     else:
         count = len(ordered)
@@ -1733,6 +1746,134 @@ def _save_codex_reset_cards_state(state):
         pass
 
 
+def _codex_app_server_binary():
+    configured = _expand_path(os.environ.get("TOKEI_CODEX_BINARY"))
+    candidates = [
+        configured,
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        os.path.join(
+            HOME, "Applications", "ChatGPT.app", "Contents", "Resources", "codex"),
+        "/Applications/Codex.app/Contents/Resources/codex",
+        os.path.join(
+            HOME, "Applications", "Codex.app", "Contents", "Resources", "codex"),
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        os.path.join(HOME, ".local", "bin", "codex"),
+    ]
+    try:
+        import shutil
+        candidates.append(shutil.which("codex"))
+    except Exception:
+        pass
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _codex_app_server_rate_limits():
+    """Read the stable account/rateLimits/read RPC without exposing auth tokens."""
+    binary = _codex_app_server_binary()
+    if not binary:
+        return None
+    process = None
+    try:
+        import select
+        process = subprocess.Popen(
+            [binary, "app-server"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        deadline = time.monotonic() + _CODEX_APP_SERVER_TIMEOUT
+        total_size = 0
+
+        def send(message):
+            process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+            process.stdin.flush()
+
+        def receive(request_id):
+            nonlocal total_size
+            while time.monotonic() < deadline:
+                remaining = max(0, deadline - time.monotonic())
+                ready, _, _ = select.select([process.stdout], [], [], remaining)
+                if not ready:
+                    return None
+                line = process.stdout.readline()
+                if not line:
+                    return None
+                total_size += len(line.encode("utf-8", errors="replace"))
+                if total_size > _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES:
+                    return None
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if message.get("id") == request_id:
+                    return message
+            return None
+
+        send({
+            "method": "initialize",
+            "id": 0,
+            "params": {
+                "clientInfo": {
+                    "name": "tokei",
+                    "title": "Tokei",
+                    "version": "1.0",
+                },
+            },
+        })
+        initialized = receive(0)
+        if not initialized or initialized.get("error"):
+            return None
+        send({"method": "initialized", "params": {}})
+        send({"method": "account/read", "id": 1, "params": {"refreshToken": False}})
+        account = receive(1)
+        if not account or account.get("error"):
+            return None
+        send({"method": "account/rateLimits/read", "id": 2})
+        response = receive(2)
+        if not response or response.get("error"):
+            return None
+        result = response.get("result")
+        return result if isinstance(result, dict) else None
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+    finally:
+        if process is not None:
+            try:
+                if process.stdin:
+                    process.stdin.close()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.terminate()
+                    process.wait(timeout=0.5)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+
+def _fetch_codex_reset_cards_via_app_server(now_epoch):
+    result = _codex_app_server_rate_limits()
+    if not isinstance(result, dict):
+        return None
+    reset_credits = result.get("rateLimitResetCredits")
+    if reset_credits is None:
+        reset_credits = result.get("rate_limit_reset_credits")
+    return _normalize_codex_reset_cards(reset_credits, now_epoch)
+
+
 def fetch_codex_reset_cards(now_epoch=None):
     """Return available reset-card expirations with a persistent low-frequency cache."""
     if os.environ.get("TOKEI_CODEX_LIVE_QUOTA") == "0":
@@ -1771,23 +1912,27 @@ def fetch_codex_reset_cards(now_epoch=None):
         return cached
 
     try:
-        import urllib.request
-        from urllib.parse import urlparse
-        request = urllib.request.Request(_CODEX_RESET_CARDS_URL)
-        request.add_header("Accept", "application/json")
-        request.add_header("User-Agent", "Tokei")
-        request.add_unredirected_header("Authorization", f"Bearer {access_token}")
-        account_id = auth_context.get("account_id")
-        if account_id:
-            request.add_unredirected_header("ChatGPT-Account-Id", str(account_id))
-        with urllib.request.urlopen(request, timeout=3) as response:
-            final_url = urlparse(response.geturl())
-            if final_url.scheme != "https" or final_url.hostname != "chatgpt.com":
-                raise ValueError("unexpected Codex reset-card redirect")
-            raw = response.read(_CODEX_RESET_CARDS_MAX_RESPONSE_BYTES + 1)
-        if len(raw) > _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES:
-            raise ValueError("Codex reset-card response is too large")
-        cards = _normalize_codex_reset_cards(json.loads(raw), now_epoch)
+        source = "app_server"
+        cards = _fetch_codex_reset_cards_via_app_server(now_epoch)
+        if cards is None:
+            source = "legacy"
+            import urllib.request
+            from urllib.parse import urlparse
+            request = urllib.request.Request(_CODEX_RESET_CARDS_URL)
+            request.add_header("Accept", "application/json")
+            request.add_header("User-Agent", "Tokei")
+            request.add_unredirected_header("Authorization", f"Bearer {access_token}")
+            account_id = auth_context.get("account_id")
+            if account_id:
+                request.add_unredirected_header("ChatGPT-Account-Id", str(account_id))
+            with urllib.request.urlopen(request, timeout=3) as response:
+                final_url = urlparse(response.geturl())
+                if final_url.scheme != "https" or final_url.hostname != "chatgpt.com":
+                    raise ValueError("unexpected Codex reset-card redirect")
+                raw = response.read(_CODEX_RESET_CARDS_MAX_RESPONSE_BYTES + 1)
+            if len(raw) > _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES:
+                raise ValueError("Codex reset-card response is too large")
+            cards = _normalize_codex_reset_cards(json.loads(raw), now_epoch)
         if cards is None:
             raise ValueError("invalid Codex reset-card response")
         state = {
@@ -1798,6 +1943,7 @@ def fetch_codex_reset_cards(now_epoch=None):
             "last_attempt_at": now_epoch,
             "next_attempt_at": _codex_reset_cards_next_attempt(cards, now_epoch),
             "cards": cards,
+            "source": source,
         }
         _save_codex_reset_cards_state(state)
         return cards
