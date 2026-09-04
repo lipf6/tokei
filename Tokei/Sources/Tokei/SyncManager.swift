@@ -275,7 +275,7 @@ final class SyncManager {
     }
 
     private static let providerQuotaIDs: Set<String> = [
-        "cursor", "zed", "sub2api", "zai", "antigravity",
+        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity",
     ]
     private static let providerSettingKeys: Set<String> = [
         "sub2api_base_url", "zai_region", "zai_usage_scope",
@@ -451,6 +451,13 @@ final class SyncManager {
             mergeRanges(&u.gemini.ranges, peer.usage.gemini.ranges, pairs)
             mergeRanges(&u.grok.ranges, peer.usage.grok.ranges, pairs)
             u.grok.model = mergeModelName(u.grok.model, peer.usage.grok.model)
+            mergeRanges(&u.grokBot.ranges, peer.usage.grokBot.ranges, pairs)
+            if shouldReplaceProviderQuota(
+                current: u.grokBot.quota,
+                candidate: peer.usage.grokBot.quota
+            ) {
+                u.grokBot.quota = peer.usage.grokBot.quota
+            }
             mergeRanges(&u.qoderwork.ranges, peer.usage.qoderwork.ranges, pairs)
             mergeRanges(&u.qoder.ranges, peer.usage.qoder.ranges, pairs)
             mergeRanges(&u.hermes.ranges, peer.usage.hermes.ranges, pairs)
@@ -460,12 +467,32 @@ final class SyncManager {
             mergeRanges(&u.pi.ranges, peer.usage.pi.ranges, pairs)
             mergeRanges(&u.prime_agent.ranges, peer.usage.prime_agent.ranges, pairs)
             mergeRanges(&u.workbuddy.ranges, peer.usage.workbuddy.ranges, pairs)
+            mergeRanges(&u.workbuddyAI.ranges, peer.usage.workbuddyAI.ranges, pairs)
             mergeRanges(&u.deepseekHarness.ranges, peer.usage.deepseekHarness.ranges, pairs)
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
             mergeRanges(&u.kimicode.ranges, peer.usage.kimicode.ranges, pairs)
         }
         return u
+    }
+
+    private static func shouldReplaceProviderQuota(
+        current: ProviderQuotaStat,
+        candidate: ProviderQuotaStat
+    ) -> Bool {
+        let currentHasData = current.available || current.usage != nil
+            || !current.windows.isEmpty || !current.details.isEmpty
+        let candidateHasData = candidate.available || candidate.usage != nil
+            || !candidate.windows.isEmpty || !candidate.details.isEmpty
+        guard candidateHasData else { return false }
+        guard currentHasData else { return true }
+
+        let currentUpdated = current.updated ?? 0
+        let candidateUpdated = candidate.updated ?? 0
+        if candidateUpdated == currentUpdated {
+            return current.stale && !candidate.stale
+        }
+        return candidateUpdated > currentUpdated
     }
 
     private static func rangePairs(for peer: PeerDevice, now: Date = Date()) -> [(src: RangeKey, dst: RangeKey)] {
@@ -595,6 +622,7 @@ final class SyncManager {
             d.sessions += s.sessions
             d.calls += s.calls; d.sub_agents += s.sub_agents
             d.turns += s.turns; d.duration += s.duration
+            d.tools += s.tools; d.est += s.est
             d.ctx = weightedAverage(d.ctx, originalSessions, s.ctx, s.sessions)
             dst.set(pair.dst, d)
         }

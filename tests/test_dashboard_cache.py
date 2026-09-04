@@ -38,6 +38,30 @@ class DashboardCacheTests(unittest.TestCase):
         USAGE._cache_dashboard_days(cache, USAGE._GROK_DAYS_CACHE_KEY, days)
         self.assertFalse(cache["_dirty"])
 
+    def test_grok_bot_provider_days_are_merged_without_deleting_history(self):
+        cache = {
+            "_dirty": False,
+            USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY: {
+                "2025-12-31": {"tokens": 100},
+                "2026-09-01": {"tokens": 200},
+            },
+        }
+
+        USAGE._merge_dashboard_days(
+            cache,
+            USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY,
+            {"2026-09-01": {"tokens": 250}},
+        )
+
+        self.assertEqual(
+            cache[USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY],
+            {
+                "2025-12-31": {"tokens": 100},
+                "2026-09-01": {"tokens": 250},
+            },
+        )
+        self.assertTrue(cache["_dirty"])
+
     def test_wrapped_uses_cached_grok_days(self):
         today = date.today().isoformat()
         cache = {
@@ -166,6 +190,16 @@ class DashboardCacheTests(unittest.TestCase):
                     "models": {"glm-5.3": {"tokens": 500}},
                 },
             },
+            USAGE._GROK_BOT_PROVIDER_DAYS_CACHE_KEY: {
+                today: {
+                    "tokens": 340, "in": 40, "out": 20, "cr": 280,
+                    "cost": 0.75, "hours": [0] * 24,
+                    "models": {"grok-code-fast-1": {
+                        "tokens": 340, "in": 40, "out": 20, "cr": 280,
+                        "cost": 0.75,
+                    }},
+                },
+            },
         }
 
         result = USAGE.build_daily_costs("1d", refresh=False, _cache=cache)
@@ -176,6 +210,22 @@ class DashboardCacheTests(unittest.TestCase):
             {model["tool"] for model in result["provider_models"]},
             {"cursor", "zai"},
         )
+
+        grok_bot = next(
+            model for model in result["models"] if model["tool"] == "grok_bot"
+        )
+        self.assertEqual(grok_bot["name"], "Grok Code Fast 1")
+        self.assertEqual(grok_bot["cost"], 0.75)
+
+    def test_swift_dashboard_uses_synced_grok_bot_provider_data(self):
+        root = Path(__file__).resolve().parents[1]
+        dashboard = (root / "Tokei/Sources/Tokei/DashboardView.swift").read_text()
+        sync = (root / "Tokei/Sources/Tokei/SyncManager.swift").read_text()
+
+        self.assertNotIn('(\"grok_bot\", \"Grok Bot\", usage.grokBot.quota', dashboard)
+        self.assertIn('case \"grok_bot\": return Theme.grokBot', dashboard)
+        self.assertIn('grokBotModelsForCurrentScope(usage:', dashboard)
+        self.assertIn('u.grokBot.quota = peer.usage.grokBot.quota', sync)
 
     def test_swift_all_device_qoderwork_tokens_are_preserved(self):
         root = Path(__file__).resolve().parents[1]

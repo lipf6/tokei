@@ -93,6 +93,29 @@ class CodexResetCardsTests(unittest.TestCase):
         self.assertEqual(cards["count"], 2)
         self.assertEqual(cards["expires"], [cards["expires"][0]] * 2)
 
+    def test_available_count_is_authoritative_when_details_are_truncated(self):
+        now = 1_785_000_000
+        payload = self.payload()
+        payload["available_count"] = 2
+
+        cards = USAGE._normalize_codex_reset_cards(payload, now)
+
+        self.assertEqual(cards["count"], 2)
+        self.assertEqual(len(cards["expires"]), 1)
+
+    def test_cached_count_preserves_cards_without_expiration_details(self):
+        now = 1_785_000_000
+        cards = {
+            "count": 2,
+            "expires": [now + 600],
+            "updated": now - 60,
+        }
+
+        cached = USAGE._cached_codex_reset_cards({"cards": cards}, now)
+
+        self.assertEqual(cached["count"], 2)
+        self.assertEqual(cached["expires"], [now + 600])
+
     def test_restart_reads_persistent_cache_without_another_request(self):
         now = 1_785_000_000
         opener = mock.Mock(return_value=_Response(self.payload()))
@@ -103,6 +126,7 @@ class CodexResetCardsTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(opener.call_count, 1)
         state = json.loads(self.cache_path.read_text())
+        self.assertEqual(state["version"], USAGE._CODEX_RESET_CARDS_CACHE_VERSION)
         self.assertLessEqual(
             state["next_attempt_at"],
             now + USAGE._CODEX_RESET_CARDS_REFRESH_INTERVAL,
@@ -141,6 +165,7 @@ class CodexResetCardsTests(unittest.TestCase):
         cards = USAGE._normalize_codex_reset_cards(self.payload(), now)
         context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
         self.cache_path.write_text(json.dumps({
+            "version": USAGE._CODEX_RESET_CARDS_CACHE_VERSION,
             "account_key": context["account_key"],
             "auth_key": context["auth_key"],
             "cards": cards,
@@ -164,6 +189,7 @@ class CodexResetCardsTests(unittest.TestCase):
         now = 1_785_000_000
         context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
         self.cache_path.write_text(json.dumps({
+            "version": USAGE._CODEX_RESET_CARDS_CACHE_VERSION,
             "account_key": context["account_key"],
             "auth_key": context["auth_key"],
             "cards": {"count": 1, "expires": [now - 1], "updated": now - 100},
@@ -177,6 +203,7 @@ class CodexResetCardsTests(unittest.TestCase):
     def test_account_switch_does_not_show_previous_cards(self):
         now = 1_785_000_000
         self.cache_path.write_text(json.dumps({
+            "version": USAGE._CODEX_RESET_CARDS_CACHE_VERSION,
             "account_key": "another-account",
             "cards": {"count": 1, "expires": [now + 5000], "updated": now - 100},
             "next_attempt_at": now + 5000,
@@ -216,6 +243,7 @@ class CodexResetCardsTests(unittest.TestCase):
         now = 1_785_000_000
         old_context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
         self.cache_path.write_text(json.dumps({
+            "version": USAGE._CODEX_RESET_CARDS_CACHE_VERSION,
             "account_key": old_context["account_key"],
             "auth_key": old_context["auth_key"],
             "last_error": "auth",
@@ -233,6 +261,27 @@ class CodexResetCardsTests(unittest.TestCase):
 
         self.assertEqual(cards["count"], 1)
         self.assertEqual(opener.call_count, 1)
+
+    def test_old_cache_is_refetched_after_counting_semantics_change(self):
+        now = 1_785_000_000
+        context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
+        self.cache_path.write_text(json.dumps({
+            "account_key": context["account_key"],
+            "auth_key": context["auth_key"],
+            "cards": {"count": 1, "expires": [now + 600], "updated": now - 60},
+            "next_attempt_at": now + 3600,
+        }))
+        payload = self.payload()
+        payload["available_count"] = 2
+        opener = mock.Mock(return_value=_Response(payload))
+
+        with mock.patch("urllib.request.urlopen", opener):
+            cards = USAGE.fetch_codex_reset_cards(now_epoch=now)
+
+        self.assertEqual(cards["count"], 2)
+        self.assertEqual(opener.call_count, 1)
+        state = json.loads(self.cache_path.read_text())
+        self.assertEqual(state["version"], USAGE._CODEX_RESET_CARDS_CACHE_VERSION)
 
     def test_account_id_falls_back_to_jwt_claim(self):
         payload = {

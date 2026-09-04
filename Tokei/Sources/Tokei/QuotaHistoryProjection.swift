@@ -1,7 +1,7 @@
 import Foundation
 
 enum QuotaHistoryTool: String, CaseIterable, Identifiable {
-    case claude = "Claude"
+    case claude = "Claude Code"
     case codex = "Codex"
     case kimi = "Kimi Code"
 

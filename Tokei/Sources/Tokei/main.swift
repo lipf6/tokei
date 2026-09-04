@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Combine
+import GrokBotBridge
 
 final class Store: ObservableObject {
     @Published var usage: Usage?
@@ -55,7 +56,7 @@ final class Store: ObservableObject {
             }
         }
         allDevicesUsage = allDevices
-        applyDisplayMode(updateStatusTitle: false)
+        applyDisplayMode()
         lastUpdated = "缓存数据 · 后台更新中"
     }
 
@@ -337,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     let showX = ud.object(forKey: "showCodex") as? Bool ?? true
                     let showP = ud.object(forKey: "showPi") as? Bool ?? true
                     let showW = ud.object(forKey: "showWorkBuddy") as? Bool ?? true
+                    let showWAI = ud.object(forKey: "showWorkBuddyAI") as? Bool ?? true
                     let showD = ud.object(forKey: "showDeepSeekHarness") as? Bool ?? true
                     let showO = ud.object(forKey: "showOpenCode") as? Bool ?? true
                     let showQC = ud.object(forKey: "showQwenCode") as? Bool ?? true
@@ -348,6 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     if showX { let r = u.codex.ranges.get(.today); total += Int(r.in + r.out + r.cached) }
                     if showP { let r = u.pi.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showW { let r = u.workbuddy.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
+                    if showWAI { let r = u.workbuddyAI.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw) }
                     if showD { let r = u.deepseekHarness.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showO { let r = u.opencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.cw + r.reason) }
                     if showQC { let r = u.qwencode.ranges.get(.today); total += Int(r.in + r.out + r.cr + r.reason) }
@@ -541,6 +544,10 @@ enum Icon {
         }
         exit(0)
     }
+}
+
+if GrokBotQuotaBridge.runIfRequested() {
+    exit(0)
 }
 
 if LoginItemCommandLine.runIfRequested() {

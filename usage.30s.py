@@ -19,6 +19,10 @@
 #   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
+#   WorkBuddy AI:~/.workbuddy-ai/projects/**/*.jsonl (国际版,同结构独立统计)
+#   Grok Bot:    ~/Library/Application Support/Grok Bot/sand-client-persistence/*.blob
+#                (本地会话活动；当前快照不含 Token / 模型 / 成本)
+#                额度默认关闭；授权后由 Tokei 原生 helper 临时读取 Keychain 登录态
 #   DeepSeek:    ~/.dsh/sessions/**/*.jsonl.zstd (由 App 原生解压后增量扫描)
 #   Qwen Code:   ~/.qwen/usage/token-usage-*.jsonl (逐请求,usage_record.jsonl 补历史)
 #   Kimi Code:   ${KIMI_CODE_HOME:-~/.kimi-code}/sessions/*/*/agents/*/wire.jsonl
@@ -111,6 +115,22 @@ GROK_DIR = os.path.join(GROK_HOME, "sessions")
 GROK_LOG = os.path.join(GROK_HOME, "logs", "unified.jsonl")
 GROK_AUTH = os.path.join(GROK_HOME, "auth.json")
 WORKBUDDY_DIR = os.path.join(HOME, ".workbuddy", "projects")
+WORKBUDDY_AI_DIR = os.path.join(HOME, ".workbuddy-ai", "projects")
+GROK_BOT_DIRS = _path_candidates(
+    "TOKEI_GROK_BOT_DIR",
+    os.path.join(HOME, "Library", "Application Support", "Grok Bot",
+                 "sand-client-persistence"),
+    os.path.join(APPDATA, "Grok Bot", "sand-client-persistence"),
+    os.path.join(HOME, ".config", "Grok Bot", "sand-client-persistence"))
+GROK_BOT_SECRET_PATHS = _path_candidates(
+    "TOKEI_GROK_BOT_SECRETS",
+    os.path.join(HOME, "Library", "Application Support", "Grok Bot",
+                 "sand-secrets.json"),
+    os.path.join(APPDATA, "Grok Bot", "sand-secrets.json"),
+    os.path.join(HOME, ".config", "Grok Bot", "sand-secrets.json"))
+GROK_BOT_AUTH_MARKER = _expand_path(os.environ.get(
+    "TOKEI_GROK_BOT_AUTH_MARKER",
+    os.path.join(HOME, ".tokei", "grok_bot_keychain_authorized")))
 DEEPSEEK_HARNESS_DIR = os.path.abspath(os.path.expanduser(os.environ.get(
     "TOKEI_DSH_DECOMPRESSED_DIR", os.path.join(HOME, ".tokei", "cache", "dsh-sessions"))))
 QODER_IDE_DB = os.path.join(HOME, "Library", "Application Support", "Qoder",
@@ -531,6 +551,7 @@ _GEMINI_DAYS_CACHE_KEY = "_gemini_dashboard_days"
 _GROK_DAYS_CACHE_KEY = "_grok_dashboard_days"
 _CURSOR_PROVIDER_DAYS_CACHE_KEY = "_cursor_provider_days"
 _ZAI_PROVIDER_DAYS_CACHE_KEY = "_zai_provider_days"
+_GROK_BOT_PROVIDER_DAYS_CACHE_KEY = "_grok_bot_provider_days"
 
 
 def _remove_codex_event_cache_dir():
@@ -845,6 +866,15 @@ def _cache_dashboard_days(cache, key, days):
         cache["_dirty"] = True
 
 
+def _merge_dashboard_days(cache, key, days):
+    if not isinstance(days, dict) or not days:
+        return
+    existing = cache.get(key)
+    merged = dict(existing) if isinstance(existing, dict) else {}
+    merged.update(days)
+    _cache_dashboard_days(cache, key, merged)
+
+
 def _empty_claude():
     ranges = {k: {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0,
                   "models": {}, "sessions": set()} for k in RANGE_KEYS}
@@ -921,6 +951,13 @@ def _empty_prime_agent():
 
 def _empty_workbuddy():
     return _empty_opencode()
+
+
+def _empty_grok_bot():
+    ranges = {key: {"sessions": set(), "calls": 0, "turns": 0,
+                    "tools": 0, "duration": 0}
+              for key in RANGE_KEYS}
+    return {"ranges": ranges}
 
 
 def _empty_deepseek_harness():
@@ -1329,6 +1366,7 @@ _CODEX_QUOTA_FALLBACK_TTL = 300
 _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
 _CODEX_RESET_CARDS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+_CODEX_RESET_CARDS_CACHE_VERSION = 2
 _CODEX_RESET_CARDS_REFRESH_INTERVAL = 24 * 3600
 _CODEX_RESET_CARDS_RETRY_INTERVAL = 6 * 3600
 _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES = 256 * 1024
@@ -1632,8 +1670,14 @@ def _normalize_codex_reset_cards(data, now_epoch):
         if epoch > now_epoch:
             expires.append(epoch)
     ordered = sorted(expires)
+    available_count = data.get("available_count", data.get("availableCount"))
+    if isinstance(available_count, int) and not isinstance(available_count, bool) \
+            and available_count >= 0:
+        count = max(available_count, len(ordered))
+    else:
+        count = len(ordered)
     return {
-        "count": len(ordered),
+        "count": count,
         "expires": ordered,
         "updated": int(now_epoch),
     }
@@ -1644,6 +1688,7 @@ def _cached_codex_reset_cards(state, now_epoch):
     if not isinstance(cards, dict):
         return {}
     expires = []
+    expired_known = 0
     for value in cards.get("expires") or []:
         try:
             epoch = int(value)
@@ -1651,9 +1696,17 @@ def _cached_codex_reset_cards(state, now_epoch):
             continue
         if epoch > now_epoch:
             expires.append(epoch)
+        else:
+            expired_known += 1
     expires.sort()
+    stored_count = cards.get("count")
+    if isinstance(stored_count, int) and not isinstance(stored_count, bool) \
+            and stored_count >= 0:
+        count = max(len(expires), stored_count - expired_known)
+    else:
+        count = len(expires)
     return {
-        "count": len(expires),
+        "count": count,
         "expires": expires,
         "updated": cards.get("updated"),
     }
@@ -1696,8 +1749,14 @@ def fetch_codex_reset_cards(now_epoch=None):
         return {}
 
     state = _load_json(CODEX_RESET_CARDS_CACHE, {})
-    if not isinstance(state, dict) or state.get("account_key") != account_key:
-        state = {"account_key": account_key, "auth_key": auth_key}
+    if not isinstance(state, dict) \
+            or state.get("version") != _CODEX_RESET_CARDS_CACHE_VERSION \
+            or state.get("account_key") != account_key:
+        state = {
+            "version": _CODEX_RESET_CARDS_CACHE_VERSION,
+            "account_key": account_key,
+            "auth_key": auth_key,
+        }
     elif state.get("auth_key") and state.get("auth_key") != auth_key:
         # Codex refreshed or replaced the token after an auth failure. Retry once now.
         state["next_attempt_at"] = 0
@@ -1732,6 +1791,7 @@ def fetch_codex_reset_cards(now_epoch=None):
         if cards is None:
             raise ValueError("invalid Codex reset-card response")
         state = {
+            "version": _CODEX_RESET_CARDS_CACHE_VERSION,
             "account_key": account_key,
             "auth_key": auth_key,
             "fetched_at": now_epoch,
@@ -4244,6 +4304,7 @@ _PROVIDER_QUOTA_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _PROVIDER_QUOTA_CACHE_LOCK = threading.Lock()
 _PROVIDER_QUOTA_ENV = {
     "cursor": "TOKEI_CURSOR_QUOTA",
+    "grok_bot": "TOKEI_GROK_BOT_QUOTA",
     "zed": "TOKEI_ZED_QUOTA",
     "sub2api": "TOKEI_SUB2API_QUOTA",
     "zai": "TOKEI_ZAI_QUOTA",
@@ -4433,8 +4494,39 @@ def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=Fals
     return out
 
 
+def _latest_cached_provider_quota(provider, max_age=None, now_epoch=None, stale=False):
+    """Return the latest aggregate, optionally enforcing a maximum age."""
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+    entry = (root.get("providers") or {}).get(provider) if isinstance(root, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    fetched_at = _provider_number(entry.get("fetched_at"))
+    quota = entry.get("quota")
+    now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    if fetched_at is None or not isinstance(quota, dict):
+        return None
+    age = now_epoch - int(fetched_at)
+    if age < -300 or (max_age is not None and age > max_age):
+        return None
+    out = json.loads(json.dumps(quota))
+    if stale:
+        out["stale"] = True
+        out["source"] = "cache"
+    return out
+
+
 def _save_provider_quota_cache(provider, marker, quota, fetched_at=None):
-    if not isinstance(quota, dict) or not quota.get("available"):
+    usage = quota.get("usage") if isinstance(quota, dict) else None
+    usage_ranges = usage.get("ranges") if isinstance(usage, dict) else None
+    has_usage = isinstance(usage_ranges, dict) and any(
+        isinstance(row, dict) and (
+            _provider_usage_int(row.get("tokens")) > 0
+            or _provider_usage_int(row.get("requests")) > 0
+        )
+        for row in usage_ranges.values()
+    )
+    if not isinstance(quota, dict) or (not quota.get("available") and not has_usage):
         return
     with _PROVIDER_QUOTA_CACHE_LOCK:
         root = _load_json(PROVIDER_QUOTA_CACHE, {})
@@ -4448,6 +4540,46 @@ def _save_provider_quota_cache(provider, marker, quota, fetched_at=None):
             "fetched_at": int(fetched_at if fetched_at is not None else datetime.now().timestamp()),
             "quota": quota,
         }
+        root = {"version": 1, "providers": providers}
+        try:
+            _atomic_write_json(PROVIDER_QUOTA_CACHE, root)
+            os.chmod(PROVIDER_QUOTA_CACHE, 0o600)
+        except OSError:
+            pass
+
+
+def _provider_quota_recent_attempt_result(provider, marker, max_age, now_epoch=None):
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+    entry = (root.get("providers") or {}).get(provider) if isinstance(root, dict) else None
+    if not isinstance(entry, dict) or entry.get("marker") != marker:
+        return None
+    attempted_at = _provider_number(entry.get("attempted_at"))
+    if attempted_at is None:
+        return None
+    now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    age = now_epoch - int(attempted_at)
+    if not -300 <= age <= max_age:
+        return None
+    result = entry.get("attempt_result")
+    return result if result in {"empty", "failed"} else "failed"
+
+
+def _save_provider_quota_attempt(provider, marker, attempted_at=None, result="failed"):
+    with _PROVIDER_QUOTA_CACHE_LOCK:
+        root = _load_json(PROVIDER_QUOTA_CACHE, {})
+        if not isinstance(root, dict):
+            root = {}
+        providers = root.get("providers")
+        if not isinstance(providers, dict):
+            providers = {}
+        previous = providers.get(provider)
+        entry = dict(previous) if isinstance(previous, dict) \
+            and previous.get("marker") == marker else {"marker": marker}
+        entry["attempted_at"] = int(
+            attempted_at if attempted_at is not None else datetime.now().timestamp())
+        entry["attempt_result"] = result if result in {"empty", "failed"} else "failed"
+        providers[provider] = entry
         root = {"version": 1, "providers": providers}
         try:
             _atomic_write_json(PROVIDER_QUOTA_CACHE, root)
@@ -4772,16 +4904,6 @@ def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, use
         if api_pct is not None:
             windows.append(_provider_window(
                 "cursor-api", "第三方模型", api_pct, cycle_end, window_minutes))
-        if isinstance(sand_usage, dict) and sand_usage.get("hasNonZeroIncludedLimit") is True:
-            sand_pct = _provider_percent(sand_usage.get("usagePercent"))
-            if sand_pct is not None:
-                sand_start = _provider_epoch(sand_usage.get("currentPeriodStart"))
-                sand_reset = _provider_epoch(sand_usage.get("nextResetTimestampUtc"))
-                sand_minutes = int((sand_reset - sand_start) / 60) \
-                    if sand_start and sand_reset and sand_reset > sand_start else None
-                windows.append(_provider_window(
-                    "cursor-grok-bot", "Grok Bot", sand_pct, sand_reset, sand_minutes))
-
     details = []
     if plan_limit > 0 and not legacy:
         details.append({
@@ -4818,14 +4940,211 @@ def _normalize_cursor_quota(summary, *, request_usage=None, sand_usage=None, use
     }
 
 
-def fetch_cursor_quota(session=None):
+def _grok_bot_active_account_id(path=None):
+    secrets_path = path or _first_existing_file(GROK_BOT_SECRET_PATHS)
+    if not secrets_path or not os.path.isfile(secrets_path):
+        return None
+    try:
+        if os.path.getsize(secrets_path) > _PROVIDER_QUOTA_MAX_RESPONSE_BYTES:
+            return None
+        outer = _load_json(secrets_path, {})
+        encoded = outer.get("cursor-accounts") if isinstance(outer, dict) else None
+        if not isinstance(encoded, str) or len(encoded) > _PROVIDER_QUOTA_MAX_RESPONSE_BYTES:
+            return None
+        container = json.loads(encoded)
+    except (OSError, ValueError, TypeError):
+        return None
+    active = container.get("active") if isinstance(container, dict) else None
+    accounts = container.get("accounts") if isinstance(container, dict) else None
+    if not isinstance(active, str) or not re.fullmatch(r"[0-9a-f]{64}", active):
+        return None
+    return active if isinstance(accounts, dict) and isinstance(accounts.get(active), dict) else None
+
+
+def _grok_bot_authorization_generation(path=None):
+    marker = path or GROK_BOT_AUTH_MARKER
+    if not marker:
+        return None
+    try:
+        stat = os.stat(marker, follow_symlinks=False)
+    except OSError:
+        return None
+    return stat.st_mtime_ns if os.path.isfile(marker) else None
+
+
+def _grok_bot_helper_path():
+    configured = os.environ.get("TOKEI_GROK_BOT_HELPER")
+    candidates = [configured] if isinstance(configured, str) and configured.strip() else []
+    if sys.platform == "darwin":
+        candidates.append("/Applications/Tokei.app/Contents/MacOS/Tokei")
+    for candidate in candidates:
+        path = _expand_path(candidate)
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _grok_bot_helper_sand_usage():
+    helper = _grok_bot_helper_path()
+    if not helper:
+        return None
+    try:
+        result = subprocess.run(
+            [helper, "--grok-bot-data-json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=35,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0 or len(result.stdout) > 16 * 1024 * 1024:
+        return None
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _grok_bot_repair_authorization_marker():
+    """Restore a missing local marker when Keychain access is still valid."""
+    helper = _grok_bot_helper_path()
+    if not helper:
+        return False
+    try:
+        result = subprocess.run(
+            [helper, "--grok-bot-verify"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and _grok_bot_authorization_generation() is not None
+
+
+def _grok_bot_usage_from_bridge(payload):
+    if not isinstance(payload, dict) or payload.get("usageFetched") is not True:
+        return None
+    events = payload.get("usageEventsDisplay")
+    if not isinstance(events, list):
+        return None
+    unique = []
+    seen = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        try:
+            marker = json.dumps(event, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError):
+            continue
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(event)
+    usage = _normalize_cursor_usage_events(unique)
+    all_range = (usage.get("ranges") or {}).get("all") if isinstance(usage, dict) else None
+    if isinstance(all_range, dict):
+        all_range["coverage"] = "本年"
+    return usage
+
+
+def _grok_bot_provider_data(payload, *, updated=None):
+    if not isinstance(payload, dict):
+        return {}
+    is_bridge_payload = "quotaFetched" in payload or "usageFetched" in payload
+    sand_usage = payload.get("sandUsage") if is_bridge_payload else payload
+    quota = _normalize_grok_bot_quota(
+        sand_usage, updated=updated, source="grok-bot-api")
+    usage = _grok_bot_usage_from_bridge(payload) if is_bridge_payload else None
+    ranges = usage.get("ranges") if isinstance(usage, dict) else None
+    has_usage = isinstance(ranges, dict) and any(
+        isinstance(row, dict) and (
+            _provider_usage_int(row.get("tokens")) > 0
+            or _provider_usage_int(row.get("requests")) > 0
+        )
+        for row in ranges.values()
+    )
+    if has_usage:
+        if not quota:
+            quota = {
+                "available": False,
+                "plan": None,
+                "account": None,
+                "windows": [],
+                "details": [],
+                "source": "grok-bot-api",
+                "updated": int(updated if updated is not None else datetime.now().timestamp()),
+                "stale": False,
+            }
+        quota["usage"] = usage
+    return quota
+
+
+def _normalize_grok_bot_quota(sand_usage, *, user_info=None, identity=None, updated=None,
+                              source="cursor-sand-api"):
+    if not isinstance(sand_usage, dict):
+        return {}
+    used_pct = _provider_percent(sand_usage.get("usagePercent"))
+    if used_pct is None or sand_usage.get("hasNonZeroIncludedLimit") is False:
+        return {}
+    period_start = _provider_epoch(sand_usage.get("currentPeriodStart"))
+    reset = _provider_epoch(sand_usage.get("nextResetTimestampUtc"))
+    window_minutes = int((reset - period_start) / 60) \
+        if period_start and reset and reset > period_start else None
+    plan = sand_usage.get("grokPlanLabel") or sand_usage.get("planLabel") \
+        or sand_usage.get("plan")
+    plan = plan.strip() if isinstance(plan, str) and plan.strip() else None
+    return {
+        "available": True,
+        "plan": plan,
+        "account": None,
+        "windows": [_provider_window(
+            "grok-bot-period", "本周期额度", used_pct, reset, window_minutes)],
+        "details": [],
+        "source": source,
+        "updated": int(updated if updated is not None else datetime.now().timestamp()),
+        "stale": False,
+    }
+
+
+def _grok_bot_quota_from_cursor(cursor_quota):
+    if not isinstance(cursor_quota, dict):
+        return {}
+    source_window = next((window for window in cursor_quota.get("windows", [])
+                          if isinstance(window, dict)
+                          and window.get("id") == "cursor-grok-bot"), None)
+    if source_window is None:
+        return {}
+    window = dict(source_window)
+    window["id"] = "grok-bot-period"
+    window["title"] = "本周期额度"
+    plan = window.pop("detail", None)
+    return {
+        "available": True,
+        "plan": plan,
+        "account": None,
+        "windows": [window],
+        "details": [],
+        "source": "cursor-sand-api",
+        "updated": cursor_quota.get("updated"),
+        "stale": bool(cursor_quota.get("stale")),
+    }
+
+
+def fetch_cursor_quota(session=None, force=False):
     session = session or _cursor_session()
     if not session:
         return {}
     marker = _provider_credential_marker("cursor-usage-v1", session["marker"])
-    cached = _cached_provider_quota("cursor", marker, _PROVIDER_QUOTA_TTL)
-    if cached:
-        return cached
+    if not force:
+        cached = _cached_provider_quota("cursor", marker, _PROVIDER_QUOTA_TTL)
+        if cached:
+            return cached
     headers = {"Cookie": session["cookie"]}
     base = "https://cursor.com"
     try:
@@ -4863,6 +5182,10 @@ def fetch_cursor_quota(session=None):
             user_info=user_info, identity=session)
         quota["usage"] = usage
         _save_provider_quota_cache("cursor", marker, quota)
+        grok_bot_quota = _normalize_grok_bot_quota(
+            sand_usage, user_info=user_info, identity=session)
+        if grok_bot_quota:
+            _save_provider_quota_cache("grok_bot", marker, grok_bot_quota)
         return quota
     except Exception:
         fallback = _cached_provider_quota(
@@ -4874,6 +5197,97 @@ def fetch_cursor_quota(session=None):
 
 def scan_cursor_quota():
     return fetch_cursor_quota() if _provider_quota_enabled("cursor") else {}
+
+
+def _grok_bot_usage_only_fallback():
+    cached = _latest_cached_provider_quota(
+        "grok_bot", max_age=None, stale=True)
+    usage = cached.get("usage") if isinstance(cached, dict) else None
+    ranges = usage.get("ranges") if isinstance(usage, dict) else None
+    if not isinstance(ranges, dict) or not any(
+            isinstance(row, dict) and _provider_usage_int(row.get("tokens")) > 0
+            for row in ranges.values()):
+        return {}
+    return {
+        "available": False,
+        "plan": None,
+        "account": None,
+        "windows": [],
+        "details": [],
+        "usage": usage,
+        "source": "cache",
+        "updated": cached.get("updated"),
+        "stale": True,
+    }
+
+
+def fetch_grok_bot_quota(session=None):
+    native_fallback = _latest_cached_provider_quota(
+        "grok_bot", _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) \
+        or _grok_bot_usage_only_fallback()
+    if session is None:
+        account_id = _grok_bot_active_account_id()
+        authorization_generation = _grok_bot_authorization_generation()
+        if account_id and authorization_generation is None:
+            repair_marker = _provider_credential_marker(
+                "grok-bot-auth-repair-v1", account_id)
+            recent_repair = _provider_quota_recent_attempt_result(
+                "grok_bot_auth", repair_marker, _PROVIDER_QUOTA_TTL)
+            if recent_repair is None:
+                if _grok_bot_repair_authorization_marker():
+                    authorization_generation = _grok_bot_authorization_generation()
+                else:
+                    _save_provider_quota_attempt(
+                        "grok_bot_auth", repair_marker, result="failed")
+        if account_id and authorization_generation is not None:
+            native_marker = _provider_credential_marker(
+                "grok-bot-account-v1", account_id, authorization_generation)
+            cached = _cached_provider_quota(
+                "grok_bot", native_marker, _PROVIDER_QUOTA_TTL)
+            if cached:
+                return cached
+            native_fallback = _cached_provider_quota(
+                "grok_bot", native_marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) \
+                or native_fallback
+            recent_attempt = _provider_quota_recent_attempt_result(
+                "grok_bot", native_marker, _PROVIDER_QUOTA_TTL)
+            if recent_attempt == "empty":
+                return {}
+            if recent_attempt is None:
+                payload = _grok_bot_helper_sand_usage()
+                if payload is not None:
+                    quota = _grok_bot_provider_data(
+                        payload, updated=payload.get("updated"))
+                    if quota:
+                        _save_provider_quota_cache("grok_bot", native_marker, quota)
+                        return quota
+                    if payload.get("quotaFetched") is True or "quotaFetched" not in payload:
+                        _save_provider_quota_attempt(
+                            "grok_bot", native_marker, result="empty")
+                        return {}
+                _save_provider_quota_attempt("grok_bot", native_marker)
+
+    session = session or _cursor_session()
+    if not session:
+        return native_fallback
+    marker = _provider_credential_marker("cursor-usage-v1", session["marker"])
+    cached = _cached_provider_quota("grok_bot", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    cursor_quota = fetch_cursor_quota(session, force=True)
+    cached = _cached_provider_quota("grok_bot", marker, _PROVIDER_QUOTA_TTL)
+    if cached:
+        return cached
+    quota = _grok_bot_quota_from_cursor(cursor_quota)
+    if quota:
+        _save_provider_quota_cache("grok_bot", marker, quota)
+        return quota
+    return _cached_provider_quota(
+        "grok_bot", marker, _PROVIDER_QUOTA_FALLBACK_TTL, stale=True) or native_fallback
+
+
+def scan_grok_bot_quota():
+    return fetch_grok_bot_quota() if _provider_quota_enabled("grok_bot") else {}
 
 
 # ----- Zed -----
@@ -5702,15 +6116,26 @@ def scan_provider_quotas(errors=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     all_scans = {
-        "cursor": scan_cursor_quota,
         "zed": scan_zed_quota,
         "sub2api": scan_sub2api_quota,
         "zai": scan_zai_quota,
         "antigravity": scan_antigravity_quota,
     }
-    result = {name: {} for name in all_scans}
+    result = {name: {} for name in (*all_scans, "cursor", "grok_bot")}
     scans = {name: scan for name, scan in all_scans.items()
              if _provider_quota_enabled(name)}
+    cursor_enabled = _provider_quota_enabled("cursor")
+    grok_bot_enabled = _provider_quota_enabled("grok_bot")
+    if cursor_enabled or grok_bot_enabled:
+        def cursor_bundle():
+            session = _cursor_session()
+            cursor_quota = fetch_cursor_quota(session) \
+                if cursor_enabled and session else {}
+            # Native Grok Bot authorization is always tried first. Its own
+            # fallback can reuse Cursor when the native login is unavailable.
+            grok_bot_quota = fetch_grok_bot_quota() if grok_bot_enabled else {}
+            return cursor_quota, grok_bot_quota
+        scans["cursor_bundle"] = cursor_bundle
     if not scans:
         return result
     with ThreadPoolExecutor(max_workers=len(scans), thread_name_prefix="tokei-quota") as pool:
@@ -5719,10 +6144,18 @@ def scan_provider_quotas(errors=None):
             name = futures[future]
             try:
                 value = future.result()
-                result[name] = value if isinstance(value, dict) else {}
+                if name == "cursor_bundle":
+                    cursor_quota, grok_bot_quota = value
+                    if cursor_enabled:
+                        result["cursor"] = cursor_quota
+                    if grok_bot_enabled:
+                        result["grok_bot"] = grok_bot_quota
+                else:
+                    result[name] = value if isinstance(value, dict) else {}
             except Exception as error:
                 if errors is not None:
-                    errors[f"{name}_quota"] = f"{type(error).__name__}: {error}"
+                    error_name = "cursor" if name == "cursor_bundle" else name
+                    errors[f"{error_name}_quota"] = f"{type(error).__name__}: {error}"
     return result
 
 
@@ -7146,7 +7579,8 @@ def scan_prime_agent(bounds, cache):
 
 
 # ---------- WorkBuddy ----------
-# JSONL 文件: ~/.workbuddy/projects/<encoded-cwd>/<session>.jsonl
+# JSONL 文件: ~/.workbuddy/projects 和 ~/.workbuddy-ai/projects 下的会话文件。
+# 两个独立 App 共用解析逻辑,但缓存、账本和展示分别统计。
 # 每个带 usage 的 item 代表一次模型调用。providerData 中的同一份 usage 仅作字段补全，
 # 不重复累计；reasoning_tokens 已包含在 output_tokens 中。
 def _workbuddy_number(obj, *keys):
@@ -7290,14 +7724,14 @@ def _iter_workbuddy_records(file_cache):
         yield path, entry, record
 
 
-def scan_workbuddy(bounds, cache):
-    ledger_touch("workbuddy")
-    fc = cache.setdefault("workbuddy", {})
+def _scan_workbuddy_root(bounds, cache, root, tool_key):
+    ledger_touch(tool_key)
+    fc = cache.setdefault(tool_key, {})
     B = _empty_token_ranges()
-    if not os.path.isdir(WORKBUDDY_DIR):
+    if not os.path.isdir(root):
         return {"ranges": B}
 
-    files = set(glob.glob(os.path.join(WORKBUDDY_DIR, "**", "*.jsonl"), recursive=True))
+    files = set(glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True))
     stale = set(fc.keys())
     for path in sorted(files):
         stale.discard(path)
@@ -7366,7 +7800,7 @@ def scan_workbuddy(bounds, cache):
         for range_key in classify_date(day_date, bounds):
             B[range_key]["sessions"].update(sessions.get(day_key, set()))
 
-    for day_key, day in ledger_reconcile("workbuddy", days).items():
+    for day_key, day in ledger_reconcile(tool_key, days).items():
         try:
             day_date = date.fromisoformat(day_key)
         except ValueError:
@@ -7374,6 +7808,208 @@ def scan_workbuddy(bounds, cache):
         for range_key in classify_date(day_date, bounds):
             _merge_token_day(B[range_key], day)
     return {"ranges": B}
+
+
+def scan_workbuddy(bounds, cache):
+    return _scan_workbuddy_root(bounds, cache, WORKBUDDY_DIR, "workbuddy")
+
+
+def scan_workbuddy_ai(bounds, cache):
+    return _scan_workbuddy_root(bounds, cache, WORKBUDDY_AI_DIR, "workbuddy_ai")
+
+
+# ---------- Grok Bot ----------
+# Grok Bot persists transcript snapshots as JSON blobs. They currently expose
+# message/activity metadata, but no model, token, or billing fields. Keep this
+# scanner activity-only so text length can never be mistaken for token usage.
+_GROK_BOT_MAX_BLOB_BYTES = 64 * 1024 * 1024
+_GROK_BOT_ACTIVE_GAP_SECONDS = 5 * 60
+
+
+def _grok_bot_parse_blob(path):
+    try:
+        size = os.path.getsize(path)
+        if size <= 0 or size > _GROK_BOT_MAX_BLOB_BYTES:
+            return {"kind": "ignored"}
+        with open(path, "r", encoding="utf-8") as handle:
+            root = json.load(handle)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return {"kind": "ignored"}
+    value = root.get("value") if isinstance(root, dict) else None
+    if not isinstance(value, dict):
+        return {"kind": "ignored"}
+
+    rows = value.get("rows")
+    if isinstance(rows, list):
+        clean_rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_id = row.get("id")
+            markers = []
+            for candidate in (row.get("lastMessageId"), row.get("newestEntryId")):
+                if isinstance(candidate, str) and candidate:
+                    markers.append(candidate)
+            last_entry = row.get("lastEntry")
+            if isinstance(last_entry, dict):
+                for candidate in (last_entry.get("id"), last_entry.get("requestId")):
+                    if isinstance(candidate, str) and candidate:
+                        markers.append(candidate)
+            if isinstance(row_id, str) and row_id:
+                clean_rows.append({
+                    "id": row_id,
+                    "markers": sorted(set(markers)),
+                })
+        return {"kind": "roster", "rows": clean_rows}
+
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        return {"kind": "ignored"}
+    days = {}
+    entry_ids = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_timestamp = _provider_number(entry.get("timestampMs"))
+        if raw_timestamp is None or raw_timestamp <= 0:
+            continue
+        timestamp = raw_timestamp / 1000.0 if raw_timestamp > 100_000_000_000 \
+            else raw_timestamp
+        try:
+            dt = datetime.fromtimestamp(timestamp, timezone.utc).astimezone()
+        except (OverflowError, OSError, ValueError):
+            continue
+        day_key = dt.date().isoformat()
+        day = days.setdefault(day_key, {
+            "turn_ids": set(), "call_ids": set(), "tool_ids": set(), "timestamps": [],
+        })
+        entry_id = entry.get("id")
+        stable_id = entry_id if isinstance(entry_id, str) and entry_id \
+            else f"{path}:{len(entry_ids)}:{int(timestamp * 1000)}"
+        if isinstance(entry_id, str) and entry_id:
+            entry_ids.append(entry_id)
+        day["timestamps"].append(timestamp)
+        kind = entry.get("kind")
+        if kind == "message" and entry.get("role") == "user":
+            day["turn_ids"].add(stable_id)
+        if kind == "send-message":
+            request_id = entry.get("requestId")
+            call_id = request_id if isinstance(request_id, str) and request_id else stable_id
+            day["call_ids"].add(call_id)
+            message = entry.get("message")
+            if isinstance(message, dict) and message.get("type") == "connector":
+                day["tool_ids"].add(stable_id)
+
+    clean_days = {}
+    for day_key, day in days.items():
+        timestamps = sorted(set(day["timestamps"]))
+        duration = sum(
+            int(current - previous)
+            for previous, current in zip(timestamps, timestamps[1:])
+            if 0 < current - previous <= _GROK_BOT_ACTIVE_GAP_SECONDS
+        )
+        clean_days[day_key] = {
+            "turns": len(day["turn_ids"]),
+            "calls": len(day["call_ids"]),
+            "tools": len(day["tool_ids"]),
+            "duration": duration,
+        }
+    marker_ids = entry_ids[:4] + entry_ids[-64:]
+    fingerprint_material = "\0".join([
+        str(len(entry_ids)), entry_ids[0] if entry_ids else "",
+        entry_ids[-1] if entry_ids else "",
+    ])
+    fingerprint = hashlib.sha256(fingerprint_material.encode("utf-8")).hexdigest()
+    return {
+        "kind": "transcript",
+        "days": clean_days,
+        "markers": sorted(set(marker_ids)),
+        "fingerprint": fingerprint,
+    }
+
+
+def scan_grok_bot(bounds, cache):
+    ledger_touch("grok_bot")
+    file_cache = cache.setdefault("grok_bot", {})
+    roots = _existing_dirs(GROK_BOT_DIRS)
+    seen = set()
+    for root in roots:
+        real_root = os.path.realpath(root)
+        for path in glob.glob(os.path.join(root, "*.blob")):
+            try:
+                real_path = os.path.realpath(path)
+                if os.path.commonpath((real_root, real_path)) != real_root:
+                    continue
+                stat = os.stat(real_path)
+            except (OSError, ValueError):
+                continue
+            seen.add(real_path)
+            signature = (stat.st_mtime_ns, stat.st_size)
+            old = file_cache.get(real_path)
+            if isinstance(old, dict) and old.get("sig") == list(signature):
+                continue
+            parsed = _grok_bot_parse_blob(real_path)
+            parsed["sig"] = list(signature)
+            file_cache[real_path] = parsed
+            cache["_dirty"] = True
+    for path in list(file_cache):
+        if path not in seen:
+            del file_cache[path]
+            cache["_dirty"] = True
+
+    roster_rows = []
+    transcripts = []
+    for path, entry in file_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("kind") == "roster":
+            roster_rows.extend(entry.get("rows") or [])
+        elif entry.get("kind") == "transcript":
+            transcripts.append((path, entry))
+
+    # Some releases keep more than one key for the same transcript snapshot.
+    # Use its stable entry boundary to avoid counting those copies twice.
+    unique = {}
+    for path, entry in transcripts:
+        fingerprint = entry.get("fingerprint") or path
+        current = unique.get(fingerprint)
+        if current is None or (entry.get("sig") or [0])[0] > (current[1].get("sig") or [0])[0]:
+            unique[fingerprint] = (path, entry)
+    transcripts = list(unique.values())
+
+    unused_rows = set(range(len(roster_rows)))
+    assigned = {}
+    for path, entry in transcripts:
+        markers = set(entry.get("markers") or [])
+        match = next((index for index in unused_rows
+                      if markers.intersection(roster_rows[index].get("markers") or [])), None)
+        if match is not None:
+            assigned[path] = roster_rows[match]
+            unused_rows.remove(match)
+    if len(transcripts) == 1 and len(roster_rows) == 1 and transcripts[0][0] not in assigned:
+        assigned[transcripts[0][0]] = roster_rows[0]
+
+    ranges = _empty_grok_bot()["ranges"]
+    for path, entry in transcripts:
+        row = assigned.get(path) or {}
+        sid = row.get("id") or entry.get("fingerprint") or path
+        if entry.get("sid") != sid or "project" in entry:
+            entry["sid"] = sid
+            entry.pop("project", None)
+            cache["_dirty"] = True
+        for day_key, day in (entry.get("days") or {}).items():
+            try:
+                local_day = date.fromisoformat(day_key)
+            except (TypeError, ValueError):
+                continue
+            for range_key in classify_date(local_day, bounds):
+                bucket = ranges[range_key]
+                bucket["sessions"].add(sid)
+                bucket["calls"] += int(day.get("calls", 0) or 0)
+                bucket["turns"] += int(day.get("turns", 0) or 0)
+                bucket["tools"] += int(day.get("tools", 0) or 0)
+                bucket["duration"] += int(day.get("duration", 0) or 0)
+    return {"ranges": ranges}
 
 
 # ---------- DeepSeek Harness ----------
@@ -9187,6 +9823,31 @@ def _claude_quota_with_freshness(snapshot, now=None):
     return result
 
 
+def _claude_quota_from_environment(now=None):
+    """Read the native Swift decoder result passed by Tokei.
+
+    The bundled app can decompress Chromium's zstd response without depending on
+    a user-installed Python module. Only quota percentages and reset timestamps
+    cross the process boundary.
+    """
+    raw = os.environ.get("TOKEI_CLAUDE_QUOTA_JSON")
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    allowed = {
+        "q5", "q5_reset", "q7", "q7_reset", "qf", "qf_reset", "q_updated",
+    }
+    snapshot = {key: payload[key] for key in allowed if key in payload}
+    if not any(snapshot.get(key) is not None for key in ("q5", "q7", "qf")):
+        return None
+    return _claude_quota_with_freshness(snapshot, now=now)
+
+
 def _scan_claude_plan_raw(now=None):
     import time
     now = int(time.time()) if now is None else int(now)
@@ -9279,7 +9940,7 @@ def _scan_claude_plan_raw(now=None):
 
 
 def scan_claude_plan():
-    return _scan_claude_plan_raw()
+    return _claude_quota_from_environment() or _scan_claude_plan_raw()
 
 
 @_with_scan_cache_lock
@@ -9301,6 +9962,10 @@ def compute():
     pi = _safe_scan("pi", lambda: scan_pi(bounds, cache), _empty_pi, errors)
     prime = _safe_scan("prime_agent", lambda: scan_prime_agent(bounds, cache), _empty_prime_agent, errors)
     wb = _safe_scan("workbuddy", lambda: scan_workbuddy(bounds, cache), _empty_workbuddy, errors)
+    wbai = _safe_scan("workbuddy_ai", lambda: scan_workbuddy_ai(bounds, cache),
+                      _empty_workbuddy, errors)
+    grok_bot = _safe_scan("grok_bot", lambda: scan_grok_bot(bounds, cache),
+                          _empty_grok_bot, errors)
     dsh = _safe_scan("deepseek_harness", lambda: scan_deepseek_harness(bounds, cache),
                      _empty_deepseek_harness, errors)
     ocode = _safe_scan("opencode", lambda: scan_opencode(bounds, cache), _empty_opencode, errors)
@@ -9431,6 +10096,18 @@ def compute():
     zcranges = {k: token_usage_range(zc["ranges"][k]) for k in RANGE_KEYS}
     mcranges = {k: token_usage_range(mc["ranges"][k]) for k in RANGE_KEYS}
     wbranges = {k: token_usage_range(wb["ranges"][k]) for k in RANGE_KEYS}
+    wbairanges = {k: token_usage_range(wbai["ranges"][k]) for k in RANGE_KEYS}
+    grok_bot_ranges = {
+        key: {
+            "in": 0, "out": 0,
+            "sessions": len(grok_bot["ranges"][key].get("sessions", [])),
+            "calls": grok_bot["ranges"][key].get("calls", 0),
+            "turns": grok_bot["ranges"][key].get("turns", 0),
+            "tools": grok_bot["ranges"][key].get("tools", 0),
+            "duration": grok_bot["ranges"][key].get("duration", 0),
+        }
+        for key in RANGE_KEYS
+    }
     dshranges = {k: token_usage_range(dsh["ranges"][k]) for k in RANGE_KEYS}
     ocranges = {k: token_usage_range(ocode["ranges"][k]) for k in RANGE_KEYS}
     qwcranges = {k: token_usage_range(qwc["ranges"][k]) for k in RANGE_KEYS}
@@ -9457,6 +10134,20 @@ def compute():
     _cache_dashboard_days(
         cache, _ZAI_PROVIDER_DAYS_CACHE_KEY,
         ((provider_quotas.get("zai") or {}).get("usage") or {}).get("days", {}))
+    _merge_dashboard_days(
+        cache, _GROK_BOT_PROVIDER_DAYS_CACHE_KEY,
+        ((provider_quotas.get("grok_bot") or {}).get("usage") or {}).get("days", {}))
+    grok_bot_days = cache.get(_GROK_BOT_PROVIDER_DAYS_CACHE_KEY)
+    if isinstance(grok_bot_days, dict) and grok_bot_days:
+        grok_bot_quota = dict(provider_quotas.get("grok_bot") or {})
+        if not grok_bot_quota:
+            grok_bot_quota = {
+                "available": False, "plan": None, "account": None,
+                "windows": [], "details": [], "source": "cache",
+                "updated": None, "stale": True,
+            }
+        grok_bot_quota["usage"] = _provider_usage_from_days(grok_bot_days)
+        provider_quotas["grok_bot"] = grok_bot_quota
     _save_scan_cache(cache)
     codex_reset_cards = _safe_scan(
         "codex_reset_cards", fetch_codex_reset_cards, lambda: {}, errors) or {}
@@ -9500,6 +10191,10 @@ def compute():
             "q_updated": grok_quota.get("updated"),
             "stale": grok_quota.get("stale"),
         },
+        "grok_bot": {
+            "ranges": grok_bot_ranges,
+            "quota": provider_quotas["grok_bot"],
+        },
         "qwenwork": qwenwork_quota,
         "qoderwork": {
             "ranges": qwranges,
@@ -9534,6 +10229,9 @@ def compute():
         "workbuddy": {
             "ranges": wbranges,
         },
+        "workbuddy_ai": {
+            "ranges": wbairanges,
+        },
         "deepseek_harness": {
             "ranges": dshranges,
         },
@@ -9563,6 +10261,7 @@ def compute():
 def _recalc_costs(result):
     """只重算缺少权威账单的工具；已有日志成本的工具保留原值。"""
     for tool_key in ("gemini", "grok", "hermes", "zcode", "mimocode", "workbuddy",
+                     "workbuddy_ai",
                      "deepseek_harness", "qwencode"):
         tool = result.get(tool_key)
         if not tool or "ranges" not in tool:
@@ -9695,6 +10394,9 @@ def _sync_safe_usage_payload(payload):
     # contain an email/login label. Keep them in the local cache only.
     for key in ("cursor", "zed", "sub2api", "zai", "antigravity"):
         snapshot.pop(key, None)
+    # Grok Bot has no account label in its normalized output. Its official
+    # aggregate stays in the snapshot so peers can adopt the freshest copy;
+    # SyncManager replaces this quota instead of adding account totals.
     return snapshot
 
 
@@ -9863,6 +10565,16 @@ def main():
         print(f"今日 缓存读 {human(wt['cr']):>6} {F}")
         print(f"今日 ≈成本  ${wt['cost']:.2f} {F}")
         print("---")
+    # WorkBuddy AI 国际版块
+    wat = d["workbuddy_ai"]["ranges"]["today"]
+    if wat["sessions"] > 0:
+        print(f"WorkBuddy Intl. {HEAD}")
+        print(f"命中率   {wat['hit']:5.1f}% {F}")
+        print(f"今日 输入   {human(wat['in']):>6} {F}")
+        print(f"今日 输出   {human(wat['out']):>6} {F}")
+        print(f"今日 缓存读 {human(wat['cr']):>6} {F}")
+        print(f"今日 ≈成本  ${wat['cost']:.2f} {F}")
+        print("---")
     # DeepSeek Harness 块
     dt = d["deepseek_harness"]["ranges"]["today"]
     if dt["sessions"] > 0:
@@ -9989,23 +10701,24 @@ def _scan_local_models():
                             pass
             except OSError:
                 pass
-    for f in glob.glob(os.path.join(WORKBUDDY_DIR, "**", "*.jsonl"), recursive=True):
-        try:
-            with open(f, encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    if '"usage"' not in line:
-                        continue
-                    try:
-                        item = json.loads(line)
-                        provider = item.get("providerData") or (item.get("message") or {}).get("providerData") or {}
-                        model = (provider.get("requestModelName") or provider.get("requestModelId")
-                                 or provider.get("model"))
-                        if model:
-                            models.add(str(model))
-                    except Exception:
-                        pass
-        except OSError:
-            pass
+    for root in (WORKBUDDY_DIR, WORKBUDDY_AI_DIR):
+        for f in glob.glob(os.path.join(root, "**", "*.jsonl"), recursive=True):
+            try:
+                with open(f, encoding="utf-8", errors="ignore") as fh:
+                    for line in fh:
+                        if '"usage"' not in line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                            provider = item.get("providerData") or (item.get("message") or {}).get("providerData") or {}
+                            model = (provider.get("requestModelName") or provider.get("requestModelId")
+                                     or provider.get("model"))
+                            if model:
+                                models.add(str(model))
+                        except Exception:
+                            pass
+            except OSError:
+                pass
     for record in _qwen_read_jsonl(_qwen_token_usage_files()):
         model = record.get("model")
         if model:
@@ -10168,7 +10881,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
 
     _empty = lambda: {"claude": 0.0, "codex": 0.0, "gemini": 0.0, "grok": 0.0,
                        "zcode": 0.0, "mimocode": 0.0, "pi": 0.0,
-                       "workbuddy": 0.0, "deepseek_harness": 0.0,
+                       "workbuddy": 0.0, "workbuddy_ai": 0.0,
+                       "deepseek_harness": 0.0,
                        "opencode": 0.0, "qwencode": 0.0, "kimicode": 0.0,
                        "prime_agent": 0.0,
                        "hermes": 0.0, "openclaw": 0.0,
@@ -10177,6 +10891,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                        "p_in": 0, "p_out": 0, "p_cr": 0, "p_cw": 0, "p_reason": 0,
                         "pa_in": 0, "pa_out": 0, "pa_cr": 0, "pa_cw": 0, "pa_reason": 0,
                        "w_in": 0, "w_out": 0, "w_cr": 0, "w_cw": 0,
+                       "wa_in": 0, "wa_out": 0, "wa_cr": 0, "wa_cw": 0,
                        "d_in": 0, "d_out": 0, "d_cr": 0, "d_cw": 0, "d_reason": 0,
                        "q_in": 0, "q_out": 0, "q_cr": 0, "q_reason": 0,
                        "g_in": 0, "g_out": 0, "g_cr": 0, "g_reason": 0,
@@ -10321,21 +11036,26 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                 for key in TOKEN_FIELDS:
                     model[key] += mv.get(key, 0)
 
-    for _, _, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
-        dk = record.get("date")
-        if not dk or (cutoff and dk < cutoff):
-            continue
-        d = days.setdefault(dk, _empty())
-        d["workbuddy"] += record.get("cost", 0)
-        d["w_in"] += record.get("in", 0); d["w_out"] += record.get("out", 0)
-        d["w_cr"] += record.get("cr", 0); d["w_cw"] += record.get("cw", 0)
-        _add_day_tokens(d, dk, "workbuddy", token_total(record))
-        name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
-        m = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0,
-                                     "cw": 0, "reason": 0, "tool": "workbuddy"})
-        m["cost"] += record.get("cost", 0)
-        for key in TOKEN_FIELDS:
-            m[key] += record.get(key, 0)
+    for tool_key, field_prefix, suffix in (
+            ("workbuddy", "w", "WorkBuddy"),
+            ("workbuddy_ai", "wa", "WorkBuddy Intl.")):
+        for _, _, record in _iter_workbuddy_records(cache.get(tool_key, {})):
+            dk = record.get("date")
+            if not dk or (cutoff and dk < cutoff):
+                continue
+            d = days.setdefault(dk, _empty())
+            d[tool_key] += record.get("cost", 0)
+            d[f"{field_prefix}_in"] += record.get("in", 0)
+            d[f"{field_prefix}_out"] += record.get("out", 0)
+            d[f"{field_prefix}_cr"] += record.get("cr", 0)
+            d[f"{field_prefix}_cw"] += record.get("cw", 0)
+            _add_day_tokens(d, dk, tool_key, token_total(record))
+            name = f"{nice_model(record.get('model', 'unknown'))} ({suffix})"
+            m = models.setdefault(name, {"cost": 0.0, "in": 0, "out": 0, "cr": 0,
+                                         "cw": 0, "reason": 0, "tool": tool_key})
+            m["cost"] += record.get("cost", 0)
+            for key in TOKEN_FIELDS:
+                m[key] += record.get(key, 0)
 
     for _, _, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
         dk = record.get("date")
@@ -10462,7 +11182,8 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
     # 输出结构保持完全不变(qoderwork/qoder_ide/qodercli 无成本列,只参与 token 合并)。
     _LEDGER_COST_COLUMNS = frozenset((
         "claude", "codex", "gemini", "grok", "hermes", "openclaw", "zcode",
-        "mimocode", "pi", "workbuddy", "deepseek_harness", "opencode", "qwencode"))
+        "mimocode", "pi", "workbuddy", "workbuddy_ai", "deepseek_harness",
+        "opencode", "qwencode"))
     for tool, tool_days in _load_ledger().get("tools", {}).items():
         if not isinstance(tool_days, dict):
             continue
@@ -10499,12 +11220,13 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "openclaw": round(v["openclaw"], 2),
               "zcode": round(v["zcode"], 2), "mimocode": round(v["mimocode"], 2), "pi": round(v["pi"], 2),
               "workbuddy": round(v["workbuddy"], 2),
+              "workbuddy_ai": round(v["workbuddy_ai"], 2),
               "deepseek_harness": round(v["deepseek_harness"], 2),
               "qwencode": round(v["qwencode"], 2),
               "kimicode": round(v["kimicode"], 2),
               "prime_agent": round(v["prime_agent"], 2),
               "total": round(v["claude"] + v["codex"] + v["gemini"] + v["grok"] + v["zcode"]
-                             + v["mimocode"] + v["pi"] + v["workbuddy"]
+                             + v["mimocode"] + v["pi"] + v["workbuddy"] + v["workbuddy_ai"]
                              + v["deepseek_harness"] + v["opencode"] + v["qwencode"]
                              + v["kimicode"] + v["prime_agent"] + v["hermes"]
                              + v["openclaw"], 2),
@@ -10513,6 +11235,7 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
               "p_in": v["p_in"], "p_out": v["p_out"], "p_cr": v["p_cr"], "p_cw": v["p_cw"], "p_reason": v["p_reason"],
                "pa_in": v["pa_in"], "pa_out": v["pa_out"], "pa_cr": v["pa_cr"], "pa_cw": v["pa_cw"], "pa_reason": v["pa_reason"],
               "w_in": v["w_in"], "w_out": v["w_out"], "w_cr": v["w_cr"], "w_cw": v["w_cw"],
+              "wa_in": v["wa_in"], "wa_out": v["wa_out"], "wa_cr": v["wa_cr"], "wa_cw": v["wa_cw"],
               "d_in": v["d_in"], "d_out": v["d_out"], "d_cr": v["d_cr"],
               "d_cw": v["d_cw"], "d_reason": v["d_reason"],
               "q_in": v["q_in"], "q_out": v["q_out"], "q_cr": v["q_cr"], "q_reason": v["q_reason"],
@@ -10538,43 +11261,52 @@ def build_daily_costs(period="all", refresh=True, _cache=None):
                            "reason": v.get("reason", 0), "tokens": total_tok, "tool": v["tool"],
                            "cost_per_k": cost_per_k, "out_ratio": out_ratio})
 
-    provider_models = {}
-    for cache_key, tool, suffix in (
-            (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
-            (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号")):
-        for day_key, day in (cache.get(cache_key) or {}).items():
-            if cutoff and day_key < cutoff or not isinstance(day, dict):
-                continue
-            for raw_name, raw_usage in (day.get("models") or {}).items():
-                if not isinstance(raw_usage, dict):
+    def account_model_rows(specs):
+        aggregated = {}
+        for cache_key, tool, suffix in specs:
+            for day_key, day in (cache.get(cache_key) or {}).items():
+                if cutoff and day_key < cutoff or not isinstance(day, dict):
                     continue
-                name = f"{nice_model(raw_name)} ({suffix})"
-                model = provider_models.setdefault(
-                    name,
-                    {"name": name, "cost": 0.0, "in": 0, "out": 0,
-                     "cr": 0, "cw": 0, "reason": 0, "tokens": 0,
-                     "tool": tool})
-                components = {field: _provider_usage_int(raw_usage.get(field))
-                              for field in _PROVIDER_USAGE_FIELDS}
-                model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
-                    or sum(components.values())
-                for field, value in components.items():
-                    model[field] += value
-                cost = _provider_number(raw_usage.get("cost")) or 0.0
-                if cost >= 0:
-                    model["cost"] += cost
+                for raw_name, raw_usage in (day.get("models") or {}).items():
+                    if not isinstance(raw_usage, dict):
+                        continue
+                    display_name = nice_model(raw_name)
+                    name = f"{display_name} ({suffix})" if suffix else display_name
+                    model = aggregated.setdefault(
+                        name,
+                        {"name": name, "cost": 0.0, "in": 0, "out": 0,
+                         "cr": 0, "cw": 0, "reason": 0, "tokens": 0,
+                         "tool": tool})
+                    components = {field: _provider_usage_int(raw_usage.get(field))
+                                  for field in _PROVIDER_USAGE_FIELDS}
+                    model["tokens"] += _provider_usage_int(raw_usage.get("tokens")) \
+                        or sum(components.values())
+                    for field, value in components.items():
+                        model[field] += value
+                    cost = _provider_number(raw_usage.get("cost")) or 0.0
+                    if cost >= 0:
+                        model["cost"] += cost
 
-    provider_model_list = []
-    for model in sorted(
-            provider_models.values(), key=lambda item: (-item["tokens"], item["name"])):
-        out_k = model["out"] / 1000 if model["out"] else 0
-        provider_model_list.append({
-            **model,
-            "cost": round(model["cost"], 2),
-            "cost_per_k": round(model["cost"] / out_k, 3) if out_k > 0 else 0,
-            "out_ratio": round(model["out"] / model["tokens"] * 100, 1)
-            if model["tokens"] > 0 else 0,
-        })
+        rows = []
+        for model in sorted(
+                aggregated.values(), key=lambda item: (-item["tokens"], item["name"])):
+            out_k = model["out"] / 1000 if model["out"] else 0
+            rows.append({
+                **model,
+                "cost": round(model["cost"], 2),
+                "cost_per_k": round(model["cost"] / out_k, 3) if out_k > 0 else 0,
+                "out_ratio": round(model["out"] / model["tokens"] * 100, 1)
+                if model["tokens"] > 0 else 0,
+            })
+        return rows
+
+    model_list.extend(account_model_rows((
+        (_GROK_BOT_PROVIDER_DAYS_CACHE_KEY, "grok_bot", None),
+    )))
+    provider_model_list = account_model_rows((
+        (_CURSOR_PROVIDER_DAYS_CACHE_KEY, "cursor", "Cursor 账号"),
+        (_ZAI_PROVIDER_DAYS_CACHE_KEY, "zai", "z.ai 账号"),
+    ))
 
     return {"daily": daily, "models": model_list, "provider_models": provider_model_list}
 
@@ -10838,26 +11570,28 @@ def build_wrapped(period="all", refresh=True, _cache=None):
                 nm = f"{nice_model(mn)} (Prime Agent)"
                 model_tok[nm] = model_tok.get(nm, 0) + token_total(mv)
 
-    # --- WorkBuddy (逐次调用，output 已含 reasoning) ---
-    for _, entry, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
-        dk = record.get("date", "")
-        if not dk or (cutoff and dk < cutoff):
-            continue
-        tok = token_total(record)
-        day_tokens[dk] = day_tokens.get(dk, 0) + tok
-        day_cost[dk] = day_cost.get(dk, 0.0) + record.get("cost", 0)
-        weekday[date.fromisoformat(dk).weekday()] += tok
-        hour = record.get("hour")
-        if isinstance(hour, int) and 0 <= hour < 24:
-            hours[hour] += tok
-            all_day_hours.add(f"{dk}:{hour}")
-        project_path = entry.get("proj") or ""
-        project = os.path.basename(project_path.rstrip("/")) or "WorkBuddy"
-        pt = proj_tok.setdefault(project, [0, 0.0])
-        pt[0] += tok; pt[1] += record.get("cost", 0)
-        day_projs.setdefault(dk, set()).add(project)
-        model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
-        model_tok[model_name] = model_tok.get(model_name, 0) + tok
+    # --- WorkBuddy 国内版与国际版（逐次调用，output 已含 reasoning） ---
+    for tool_key, suffix in (("workbuddy", "WorkBuddy"),
+                             ("workbuddy_ai", "WorkBuddy Intl.")):
+        for _, entry, record in _iter_workbuddy_records(cache.get(tool_key, {})):
+            dk = record.get("date", "")
+            if not dk or (cutoff and dk < cutoff):
+                continue
+            tok = token_total(record)
+            day_tokens[dk] = day_tokens.get(dk, 0) + tok
+            day_cost[dk] = day_cost.get(dk, 0.0) + record.get("cost", 0)
+            weekday[date.fromisoformat(dk).weekday()] += tok
+            hour = record.get("hour")
+            if isinstance(hour, int) and 0 <= hour < 24:
+                hours[hour] += tok
+                all_day_hours.add(f"{dk}:{hour}")
+            project_path = entry.get("proj") or ""
+            project = os.path.basename(project_path.rstrip("/")) or suffix
+            pt = proj_tok.setdefault(project, [0, 0.0])
+            pt[0] += tok; pt[1] += record.get("cost", 0)
+            day_projs.setdefault(dk, set()).add(project)
+            model_name = f"{nice_model(record.get('model', 'unknown'))} ({suffix})"
+            model_tok[model_name] = model_tok.get(model_name, 0) + tok
 
     # --- DeepSeek Harness (最终 message 优先，异常中断用 usage chunk) ---
     for _, entry, record in _iter_deepseek_harness_records(cache.get("deepseek_harness", {})):
@@ -11093,7 +11827,8 @@ def _load_dashboard_cache():
 # 推不出来,只能观测一次记一次 —— 见 _QUOTA_ANCHOR_FILE。
 # 周期边界落在半天,日级账本切不出来,所以整日部分取账本(权威,不受 CLI 清理旧日志
 # 影响),首尾半天取更细的来源:本机用带时间戳的事件缓存,peer 用日条目里的 hours[24]。
-_QUOTA_CYCLE_HISTORY = 8
+# 详情最多带回约一年的周周期；界面默认展示 8 个，其余由用户按需展开。
+_QUOTA_CYCLE_HISTORY = 52
 _QUOTA_WEEK_HOURS = 7 * 24
 _QUOTA_SELF_DEVICE = "本机"
 _QUOTA_ANCHOR_FILE = os.path.join(HOME, ".tokei", "quota_cycles.json")
@@ -11610,25 +12345,28 @@ def projects():
                 nm = f"{nice_model(mn)} (Prime Agent)"
                 p["model_tok"][nm] = p["model_tok"].get(nm, 0) + token_total(mv)
 
-    # WorkBuddy sessions
-    workbuddy_sessions = {}
-    for _, entry, record in _iter_workbuddy_records(cache.get("workbuddy", {})):
-        proj_path = entry.get("proj") or ""
-        if not proj_path or proj_path == "?":
-            continue
-        p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
-                                             "last_active": "", "model_tok": {}, "tools": set()})
-        p["tools"].add("workbuddy")
-        p["tokens"] += token_total(record)
-        p["cost"] += record.get("cost", 0)
-        dk = record.get("date", "")
-        if dk > p["last_active"]:
-            p["last_active"] = dk
-        model_name = f"{nice_model(record.get('model', 'unknown'))} (WorkBuddy)"
-        p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
-        workbuddy_sessions.setdefault(proj_path, set()).add(record.get("session") or entry.get("sid"))
+    # WorkBuddy 国内版与国际版 sessions
+    for tool_key, suffix in (("workbuddy", "WorkBuddy"),
+                             ("workbuddy_ai", "WorkBuddy Intl.")):
+        workbuddy_sessions = {}
+        for _, entry, record in _iter_workbuddy_records(cache.get(tool_key, {})):
+            proj_path = entry.get("proj") or ""
+            if not proj_path or proj_path == "?":
+                continue
+            p = proj_map.setdefault(proj_path, {"sessions": 0, "tokens": 0, "cost": 0.0,
+                                                 "last_active": "", "model_tok": {}, "tools": set()})
+            p["tools"].add(tool_key)
+            p["tokens"] += token_total(record)
+            p["cost"] += record.get("cost", 0)
+            dk = record.get("date", "")
+            if dk > p["last_active"]:
+                p["last_active"] = dk
+            model_name = f"{nice_model(record.get('model', 'unknown'))} ({suffix})"
+            p["model_tok"][model_name] = p["model_tok"].get(model_name, 0) + token_total(record)
+            workbuddy_sessions.setdefault(proj_path, set()).add(
+                record.get("session") or entry.get("sid"))
     for proj_path, session_ids in workbuddy_sessions.items():
-        proj_map[proj_path]["sessions"] += len(session_ids)
+            proj_map[proj_path]["sessions"] += len(session_ids)
 
     # DeepSeek Harness sessions
     deepseek_sessions = {}

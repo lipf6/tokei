@@ -487,6 +487,7 @@ class CodexCustomProviderTests(unittest.TestCase):
         now = 1_785_000_000
         auth_context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
         self.reset_cards_cache_path.write_text(json.dumps({
+            "version": USAGE._CODEX_RESET_CARDS_CACHE_VERSION,
             "account_key": auth_context["account_key"],
             "auth_key": auth_context["auth_key"],
             "next_attempt_at": now + 3600,

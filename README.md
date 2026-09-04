@@ -28,11 +28,12 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **Claude Code** | Token（输入/输出/缓存）、成本、配额、模型 |
 | **Codex CLI** | Token、成本、配额、会话 |
 | **Gemini / Antigravity CLI** | Token、思考量、成本、模型 |
-| **Cursor** | 账号 Token、请求、API 价成本、按模型统计、套餐额度与 Grok Bot 周额度 |
+| **Cursor** | 账号 Token、请求、API 价成本、按模型统计、套餐额度 |
 | **Zed** | Edit Predictions、订阅周期、账号与套餐 |
 | **Sub2API** | 日/周/月额度、限流窗口、余额、请求与 Token 摘要 |
 | **z.ai / GLM** | 近 30 天账号 Token、按模型统计、会话/周期/MCP 额度、BigModel CN 余额 |
 | **Grok Build** | Token（输入/输出/缓存/推理）、会话、上下文、延迟、配额（本地日志；可选实时） |
+| **Grok Bot** | 本地会话活动；授权后显示官方 Token、缓存、模型、成本与账号额度 |
 | **Qoder Desktop** | Token、缓存、会话、调用次数、模型 |
 | **QoderWork** | Token、调用次数、子 Agent、时长、上下文 |
 | **Qoder CLI** | 会话、调用、工具、活跃时长、估算 Token |
@@ -43,6 +44,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **Pi Coding Agent CLI** | Token、成本、缓存命中率、模型、项目 |
 | **Prime Agent** | Token、成本、缓存命中率、模型、项目（含 RLM 子代理） |
 | **WorkBuddy** | Token、成本、缓存命中率、模型、项目 |
+| **WorkBuddy Intl.** | Token、成本、缓存命中率、模型、项目 |
 | **DeepSeek Harness** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **OpenCode** | Token、成本、缓存命中率、模型 |
 | **Qwen Code** | Token、思考量、成本、模型 |
@@ -75,7 +77,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 随时切换，对比不同时段用量趋势
 
 ### 项目追踪
-- 按项目维度查看 Claude Code / Pi / WorkBuddy / Grok Build 用量
+- 按项目维度查看 Claude Code / Pi / WorkBuddy / WorkBuddy Intl. / Grok Build 用量
 - 了解每个项目消耗了多少 Token 和成本
 
 ### 多设备同步
@@ -96,11 +98,14 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - 核心 Token、成本和项目统计均在本机完成，不向 Tokei 服务上传使用数据；Cursor 与 z.ai 还可读取对应 Provider 返回的账号级 Token/模型摘要
 - Codex 额度使用本机 Codex 登录态读取官方接口；重置卡每天最多自动查询一次
 - Grok 实时额度默认关闭，可选择只读本地日志
+- Grok Bot 本地活动直接读取会话快照，快照不含 Token、模型和成本，Tokei 不按文本量估算。官方用量查询默认关闭；用户明确授权后，Tokei 临时解密 Grok Bot 当前登录态，只查询 `sand` 客户端的官方 Token、模型、成本和额度。登录 Token 只在内存中使用
 - 千问办公额度默认关闭；开启后仅调用官方桌面端的 `127.0.0.1` MCP，由已运行并登录的千问办公查询官方额度
 - Tokei 不读取或解密千问办公的 `auth-v2.dat`、浏览器 Cookie 或 `.status.json` 账号资料；仅用 `.status.json` 文件元数据使切换账号后的额度缓存失效，也不会自动启动千问办公
 - Cursor、Zed、Sub2API、z.ai 卡片默认关闭；开启后才查询额度。Sub2API 与 z.ai API Key 保存于 macOS Keychain，不写入 `config.json` 或额度缓存
 - Cursor 只读取 Cursor.app 的本地登录态数据库；Zed 以禁止交互的方式读取现有 Keychain 登录态，不会弹出授权框
-- Cursor 与 z.ai 的账号级统计在 Dashboard 中单独展示，不并入本地工具总计，避免与 Claude Code 等本地日志重复计算
+- Cursor 与 z.ai 的账号级统计在 Dashboard 中单独展示；Grok Bot 本地快照没有 Token 字段，因此官方模型用量直接并入“模型用量”，额度仅在 Grok Bot 主卡片展示
+- 开启多设备同步后，Grok Bot 的官方 Token、模型、费用和额度汇总会进入同步快照；界面采用时间最新的一份账号数据，不会按设备重复相加
+- Grok Bot 额度按实时状态过期；已采集的 Token、模型和费用按日期长期保留，后续成功查询只更新对应日期，不会因授权或网络暂时失效而清空
 - Antigravity 额度只连接已运行客户端的 `127.0.0.1` language server，不会自动启动客户端
 - 这 5 个 Provider 的额度与账号标签只保存在本机缓存，不写入多设备 Git 同步快照
 - 其他联网操作包括检查/下载更新，以及手动更新模型价格表
@@ -187,11 +192,13 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Sub2API | macOS Keychain API Key + 自定义 Base URL 的 `/v1/usage`（卡片默认关闭） |
 | z.ai / GLM | macOS Keychain API Key + Global/BigModel CN quota / model-usage API（卡片默认关闭） |
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl`（含真实 token + billing 额度）+ `sessions/*/*/{summary,signals}.json`；可选实时账单接口（设置里默认关闭） |
+| Grok Bot | `~/Library/Application Support/Grok Bot/sand-client-persistence/*.blob`（本地活动）；可选 Sand 官方 usage-events / 额度接口（首次需授权 Grok Bot 钥匙串，设置里默认关闭） |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
 | OpenClaw | `~/.openclaw/agents/*/sessions/*.jsonl` + `~/.openclaw/state/openclaw.sqlite` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
 | Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
+| WorkBuddy Intl. | `~/.workbuddy-ai/projects/<project>/*.jsonl` |
 | DeepSeek Harness | `~/.dsh/sessions/**/session.jsonl.zstd`（App 内置 zstd 解压） |
 | OpenCode | `~/.local/share/opencode/opencode.db`，旧版回退 `storage/message/` |
 | Qwen Code | `~/.qwen/usage/token-usage-*.jsonl` + `~/.qwen/usage_record.jsonl` |
@@ -371,7 +378,7 @@ Tokei is a **macOS menu bar app** that tracks usage, cost, and quotas across **2
 
 **Features:** Real-time monitoring (30s refresh, seven menu bar styles, three density modes) · Cost estimation (317 models, OpenRouter pricing) · Dashboard (daily chart, weekly heatmap) · Time ranges (today/week/month/year) · Project-level tracking · Multi-device sync (Git-based, Mac + Linux) · Annual Wrapped · Keep awake · Sit reminder · Privacy-first (local usage logs, explicit quota controls) · [Compare with CodexBar](https://tokei.lanshuagent.com#compare)
 
-**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, QwenWork
+**Supported tools:** Claude Code, Codex CLI, Gemini CLI / Antigravity, Cursor, Zed, Sub2API, z.ai / GLM, Grok Build, Grok Bot, Qoder Desktop, QoderWork, Qoder CLI, Hermes, ZCode, MiMoCode, OpenClaw, Pi Coding Agent CLI, Prime Agent, WorkBuddy, WorkBuddy Intl., DeepSeek Harness, OpenCode, Qwen Code, Kimi Code, QwenWork
 
 For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.com).
 
