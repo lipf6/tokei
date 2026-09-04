@@ -253,10 +253,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var globalMouseMonitor: Any?
 
     // 菜单栏额度颜色（与面板对应 Theme 一致）。
-    static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
-    static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
-    static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
-    static let kimiColor   = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
+    static let claudeColor = NSColor(
+        red: 217.0 / 255, green: 119.0 / 255, blue: 87.0 / 255, alpha: 1)
+    static let codexColor = NSColor(
+        red: 16.0 / 255, green: 163.0 / 255, blue: 127.0 / 255, alpha: 1)
+    static let grokColor = NSColor(
+        red: 231.0 / 255, green: 233.0 / 255, blue: 234.0 / 255, alpha: 1)
+    static let kimiColor = NSColor(red: 0, green: 124.0 / 255, blue: 1, alpha: 1)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

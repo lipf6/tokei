@@ -29,14 +29,14 @@ extension View {
 
 // 设计系统:颜色 / 间距 / 圆角集中定义,组件语义化复用。
 enum Theme {
-    static let claude = Color(red: 0.92, green: 0.52, blue: 0.40)   // 柔珊瑚
-    static let codex  = Color(red: 0.42, green: 0.68, blue: 0.98)   // 天青
+    static let claude = Color(red: 217.0 / 255, green: 119.0 / 255, blue: 87.0 / 255) // Claude 珊瑚橙 #D97757
+    static let codex = Color(red: 16.0 / 255, green: 163.0 / 255, blue: 127.0 / 255)  // OpenAI 绿 #10A37F
     static let gemini = Color(red: 0.62, green: 0.52, blue: 0.92)   // 薰衣草
     static let cursor = Color(red: 0.72, green: 0.77, blue: 0.90)   // 光标银蓝
     static let zed = Color(red: 0.93, green: 0.38, blue: 0.30)      // Zed 珊瑚红
     static let sub2api = Color(red: 0.18, green: 0.78, blue: 0.85)  // API 青
     static let zai = Color(red: 0.38, green: 0.67, blue: 0.98)      // GLM 蓝
-    static let grok   = Color(red: 0.65, green: 0.68, blue: 0.75)   // 冷灰银
+    static let grok = Color(red: 231.0 / 255, green: 233.0 / 255, blue: 234.0 / 255) // Grok 银白 #E7E9EA
     static let grokBot = Color(red: 0.95, green: 0.40, blue: 0.64)  // 星莓红
     static let qoder  = Color(red: 0.90, green: 0.75, blue: 0.35)   // 琥珀金
     static let qoderwork = Color(red: 0.75, green: 0.65, blue: 0.30)  // 暗琥珀
@@ -53,7 +53,7 @@ enum Theme {
     static let opencode = Color(red: 0.55, green: 0.75, blue: 0.90) // 天蓝灰
     static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝
     static let qwenwork = Color(red: 0.24, green: 0.72, blue: 0.68) // 千问青
-    static let kimicode = Color(red: 0.20, green: 0.78, blue: 0.66) // 月石青
+    static let kimicode = Color(red: 0, green: 124.0 / 255, blue: 1) // Kimi 品牌蓝 #007CFF
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16
