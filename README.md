@@ -236,10 +236,22 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.42
+
+- feat: 新增 Grok Bot 本地活动与授权后的官方 Token、模型、成本和额度统计
+- feat: 新增 WorkBuddy Intl. 本地用量、成本、模型及项目统计
+- feat: Claude Code 新增 CLI 额度采集，并完善额度历史记录
+- fix: 修复 Grok Bot 模型用量未进入仪表盘、额度过期或授权回退后丢失的问题，并持久化模型历史
+- fix: Codex 重置卡改用官方 App Server 读取，以 `availableCount` 为准，正确展示多张卡及到期时间
+
+### v1.0.37
+
 - feat(provider): 新增 Cursor、Zed、Sub2API、z.ai / GLM 额度卡
 - feat(provider-usage): Cursor 与 z.ai 新增账号 Token、按模型统计及 Dashboard 独立账号模型区
 - fix(antigravity): 兼容新版会话库把生成时间迁移到 `steps.metadata` 后的 Token 解析
 - feat(antigravity): 在现有 Gemini / Antigravity 卡片中读取本机 language server 额度
+- feat: 带回 Kimi Code 官方额度查询，支持周额度、5 小时额度、Extra Usage 与 OAuth 自动续期
+- fix: 修复无用量周期 Kimi Code 卡片额度提示异常
 - privacy: 外部 Provider 默认关闭，API Key 存入 macOS Keychain，账号额度不进入 Git 同步快照
 
 ### v1.0.19
