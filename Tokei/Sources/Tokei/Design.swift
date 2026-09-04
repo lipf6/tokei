@@ -30,7 +30,7 @@ extension View {
 // 设计系统:颜色 / 间距 / 圆角集中定义,组件语义化复用。
 enum Theme {
     static let claude = Color(red: 217.0 / 255, green: 119.0 / 255, blue: 87.0 / 255) // Claude 珊瑚橙 #D97757
-    static let codex = Color(red: 16.0 / 255, green: 163.0 / 255, blue: 127.0 / 255)  // OpenAI 绿 #10A37F
+    static let codex = Color(red: 0.42, green: 0.68, blue: 0.98) // 原作者天青
     static let gemini = Color(red: 0.62, green: 0.52, blue: 0.92)   // 薰衣草
     static let cursor = Color(red: 0.72, green: 0.77, blue: 0.90)   // 光标银蓝
     static let zed = Color(red: 0.93, green: 0.38, blue: 0.30)      // Zed 珊瑚红
@@ -53,7 +53,7 @@ enum Theme {
     static let opencode = Color(red: 0.55, green: 0.75, blue: 0.90) // 天蓝灰
     static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝
     static let qwenwork = Color(red: 0.24, green: 0.72, blue: 0.68) // 千问青
-    static let kimicode = Color(red: 0, green: 124.0 / 255, blue: 1) // Kimi 品牌蓝 #007CFF
+    static let kimicode = Color(red: 168.0 / 255, green: 85.0 / 255, blue: 247.0 / 255) // Kimi 紫 #A855F7
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16
