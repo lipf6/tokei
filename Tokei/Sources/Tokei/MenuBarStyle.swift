@@ -113,6 +113,21 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         return ud.bool(forKey: defaultsKey)
     }
 
+    /// 归属的「显示卡片」开关：卡片被关掉时，状态栏也不该再出现这一族窗口。
+    var visibilityDefaultsKey: String? {
+        switch self {
+        case .claude5h, .claudeWeek, .claudeFable: return "showClaude"
+        case .codex5h, .codexWeek, .grok, .kimi: return nil
+        }
+    }
+
+    /// 卡片开关没碰过时视为开（与 @AppStorage 声明的默认 true 一致）。
+    var isVisible: Bool {
+        guard let key = visibilityDefaultsKey else { return true }
+        let ud = UserDefaults.standard
+        return ud.object(forKey: key) == nil ? true : ud.bool(forKey: key)
+    }
+
     /// Grok 的窗口随数据在周/月之间变，画不出确定的符号，所以不给它符号。
     var window: MenuBarQuotaWindow? {
         switch self {
@@ -163,10 +178,10 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         return reading.value != nil && reading.stale != true
     }
 
-    /// 勾选中且数据新鲜的窗口，按 `allCases` 顺序排好。模型里存的是已用百分比，这里换成剩余。
+    /// 勾选中、未被卡片开关隐藏且数据新鲜的窗口，按 `allCases` 顺序排好。模型里存的是已用百分比，这里换成剩余。
     static func metrics(in usage: Usage) -> [MenuBarMetric] {
         allCases.compactMap { source in
-            guard source.isEnabled, source.isRenderable(in: usage),
+            guard source.isVisible, source.isEnabled, source.isRenderable(in: usage),
                   let used = source.reading(in: usage).value else { return nil }
             let remaining = 100 - used
             return MenuBarMetric(kind: .quota(source),

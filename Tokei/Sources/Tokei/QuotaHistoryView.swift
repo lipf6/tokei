@@ -57,15 +57,29 @@ struct QuotaHistoryView: View {
 
     @ObservedObject var history: QuotaHistoryStore
     @ObservedObject private var detail = QuotaDetailRepository.shared
-    @State private var tool: QuotaHistoryTool = .claude
+    @AppStorage("showClaude") private var showClaude = true
+    @State private var selectedTool: QuotaHistoryTool = .claude
     @State private var span: QuotaHistorySpan = .day
     @State private var cycleTool: String?
     @State private var expandedCycleHistory: Set<String> = []
 
+    /// 「显示卡片」关掉 Claude Code 后,轨迹页也不再提供 Claude tab。
+    private var quotaHistoryTools: [QuotaHistoryTool] {
+        QuotaHistoryTool.allCases.filter { $0 != .claude || showClaude }
+    }
+
+    /// 选中的工具被开关藏掉时,落到第一个还可见的,免得画出空视图。
+    private var tool: QuotaHistoryTool {
+        quotaHistoryTools.contains(selectedTool) ? selectedTool : (quotaHistoryTools.first ?? .codex)
+    }
+
     /// 有周期数据的工具,固定顺序 —— 免得刷新一次卡片就换个位置。
+    /// 「显示卡片」关掉 Claude Code 时,它的 tab、卡片和找回提示一起撤下。
     private var cycleTools: [String] {
         let present = Set((detail.payload?.cycles ?? []).map(\.tool))
-        return ["claude", "codex", "grok"].filter(present.contains)
+        return ["claude", "codex", "grok"].filter {
+            present.contains($0) && ($0 != "claude" || showClaude)
+        }
     }
 
     private var visibleCycleTools: [String] {
@@ -94,7 +108,12 @@ struct QuotaHistoryView: View {
             }
             footnote
         }
-        .onAppear { detail.load() }
+        .onAppear {
+            detail.load()
+            if !quotaHistoryTools.contains(selectedTool), let first = quotaHistoryTools.first {
+                selectedTool = first
+            }
+        }
     }
 
     @ViewBuilder
@@ -210,8 +229,9 @@ struct QuotaHistoryView: View {
     }
 
     /// 拿不到额度读数的工具 —— 周期切不出来,得告诉用户怎么把它找回来。
+    /// 被「显示卡片」关掉的工具不再提示,免得引导用户找回一个他主动藏掉的卡片。
     private var missingTools: [String] {
-        detail.payload?.missing ?? []
+        (detail.payload?.missing ?? []).filter { $0 != "claude" || showClaude }
     }
 
     private func missingHint(_ tool: String) -> String {
@@ -418,15 +438,17 @@ struct QuotaHistoryView: View {
         return Card(tint: Theme.codex) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .top, spacing: 12) {
-                    dailyStat("Claude Code", claude, Theme.claude)
+                    if showClaude {
+                        dailyStat("Claude Code", claude, Theme.claude)
+                    }
                     dailyStat("Codex", codex, Theme.codex)
                     dailyStat("Grok", grok, Theme.grok)
-                    dailyStat("合计", claude + codex + grok, Theme.tPrimary)
+                    dailyStat("合计", (showClaude ? claude : 0) + codex + grok, Theme.tPrimary)
                 }
                 if points.isEmpty {
                     dailyEmpty
                 } else {
-                    QuotaDailyChart(points: points)
+                    QuotaDailyChart(points: points, showClaude: showClaude)
                 }
             }
         }
@@ -485,13 +507,13 @@ struct QuotaHistoryView: View {
             }
             Spacer()
             if !span.showsDailyTokens {
-                Picker("", selection: $tool) {
-                    ForEach(QuotaHistoryTool.allCases) { tool in
+                Picker("", selection: $selectedTool) {
+                    ForEach(quotaHistoryTools) { tool in
                         Text(tool.rawValue).tag(tool)
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 216)
+                .frame(width: CGFloat(72 * quotaHistoryTools.count))
                 .controlSize(.mini)
             }
             Picker("", selection: $span) {
@@ -694,6 +716,7 @@ struct QuotaHistoryView: View {
 /// 长跨度下画每日真实 token 消耗:额度% 快照只保留 7 天,月/年区间没有曲线可画。
 private struct QuotaDailyChart: View {
     let points: [QuotaDailyPoint]
+    var showClaude = true
 
     @State private var hover: QuotaDailyPoint?
 
@@ -707,11 +730,14 @@ private struct QuotaDailyChart: View {
     private var bars: [Bar] {
         points.flatMap { point -> [Bar] in
             guard let day = Self.dayFormatter.date(from: point.d) else { return [] }
-            return [
-                Bar(day: day, tool: "Claude Code", tokens: point.c),
+            var bars = [
                 Bar(day: day, tool: "Codex", tokens: point.x),
                 Bar(day: day, tool: "Grok", tokens: point.g),
             ]
+            if showClaude {
+                bars.insert(Bar(day: day, tool: "Claude Code", tokens: point.c), at: 0)
+            }
+            return bars
         }
     }
 
@@ -724,8 +750,8 @@ private struct QuotaDailyChart: View {
             .foregroundStyle(by: .value("工具", bar.tool))
         }
         .chartForegroundStyleScale(
-            domain: ["Claude Code", "Codex", "Grok"],
-            range: [Theme.claude, Theme.codex, Theme.grok]
+            domain: showClaude ? ["Claude Code", "Codex", "Grok"] : ["Codex", "Grok"],
+            range: showClaude ? [Theme.claude, Theme.codex, Theme.grok] : [Theme.codex, Theme.grok]
         )
         .chartLegend(position: .top, alignment: .trailing, spacing: 10)
         .chartXAxis {
@@ -790,10 +816,12 @@ private struct QuotaDailyChart: View {
             Text(point.d)
                 .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                 .foregroundStyle(Theme.tPrimary)
-            hoverRow("Claude Code", point.c, Theme.claude)
+            if showClaude {
+                hoverRow("Claude Code", point.c, Theme.claude)
+            }
             hoverRow("Codex", point.x, Theme.codex)
             hoverRow("Grok", point.g, Theme.grok)
-            Text("合计 \(Fmt.grouped(point.total))")
+            Text("合计 \(Fmt.grouped(showClaude ? point.total : point.x + point.g))")
                 .font(.system(size: 8.5, design: .monospaced))
                 .foregroundStyle(Theme.tTertiary)
         }

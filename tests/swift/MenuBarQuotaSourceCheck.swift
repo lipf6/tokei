@@ -27,6 +27,7 @@ struct MenuBarQuotaSourceCheck {
         try checkDefaultMetricsUnchanged()
         try checkReading()
         try checkRenderable()
+        try checkClaudeVisibility()
         try checkDensity()
         try checkWindowGlyphsAreDistinct()
         try checkRenderedColor()
@@ -168,6 +169,33 @@ struct MenuBarQuotaSourceCheck {
                    "codex5h cannot render when the server sends no 5h window")
         try expect(MenuBarQuotaSource.codexWeek.isRenderable(in: weeklyOnlyCodex),
                    "the weekly window must survive a missing 5h window")
+    }
+
+    /// 「显示卡片」关掉 Claude Code 后，状态栏跟着撤下 Claude 一族窗口，其他家不受影响。
+    private static func checkClaudeVisibility() throws {
+        let ud = UserDefaults.standard
+        let keys = MenuBarQuotaSource.allCases.map(\.defaultsKey)
+        defer {
+            keys.forEach { ud.removeObject(forKey: $0) }
+            ud.removeObject(forKey: "showClaude")
+        }
+        keys.forEach { ud.set(true, forKey: $0) }
+
+        let usage = try decodeFixture(fixtureJSON)
+
+        // 没碰过开关：默认视为开，Claude 窗口照常出现。
+        ud.removeObject(forKey: "showClaude")
+        try expect(MenuBarQuotaSource.claude5h.isVisible,
+                   "unset showClaude must default to visible")
+        try expect(MenuBarQuotaSource.metrics(in: usage).contains { $0.kind == .quota(.claude5h) },
+                   "claude 5h must stay visible by default")
+
+        ud.set(false, forKey: "showClaude")
+        let names = MenuBarQuotaSource.metrics(in: usage).map(\.kind.displayName)
+        try expect(!names.contains { $0.hasPrefix("Claude") },
+                   "showClaude=false must hide every claude window: \(names)")
+        try expect(names == ["Codex 5h", "Codex 周", "Grok", "Kimi 周"],
+                   "non-claude windows must be unaffected: \(names)")
     }
 
     private static func checkDensity() throws {
