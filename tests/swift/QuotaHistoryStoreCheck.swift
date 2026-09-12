@@ -84,6 +84,7 @@ struct QuotaHistoryStoreCheck {
             QuotaModelActivity(model: "claude-opus", tokenDelta: 20),
         ], "a transient empty scan should not reset the activity baseline")
 
+        store.flushPendingSave()
         let reloaded = QuotaHistoryStore(fileURL: fileURL)
         try expect(reloaded.points == store.points, "history should survive a reload")
 

@@ -243,6 +243,8 @@ struct DashboardView: View {
             // Provider model days are written by the main refresh. Reload the
             // lightweight dashboard aggregation after that refresh completes so
             // z.ai/Cursor model rows stay in sync with the quota cards.
+            // popover 关上后视图树仍在,跳过这次后台加载,免得每 30s 白跑一个 python 进程。
+            guard store.popoverVisible else { return }
             dashboardRepository.load(wrappedPeriod, force: true)
         }
         .onReceive(dashboardRepository.$payloads) { payloads in

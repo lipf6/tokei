@@ -1064,28 +1064,47 @@ enum Fmt {
         return formatter.string(from: NSNumber(value: n)) ?? String(n)
     }
 
+    // DateFormatter 非线程安全;以下 formatter 只在 UI 主线程使用(调用点均为
+    // 视图格式化),按 KeepAwake.swift / QuotaHistoryView.swift 的先例 static 缓存,
+    // 不再每次调用新建。
+    private static let resetFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MM-dd HH:mm"; return f
+    }()
+    private static let dayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "MM-dd"; return f
+    }()
+    private static let beijingFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "MM-dd HH:mm"
+        return f
+    }()
+    private static let beijingFullFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
+    private static let isoDayFormatter: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f
+    }()
+
     static func reset(_ epoch: Int?) -> String {
         guard let e = epoch else { return "?" }
         let d = Date(timeIntervalSince1970: TimeInterval(e))
-        let f = DateFormatter()
-        f.dateFormat = "MM-dd HH:mm"
-        return f.string(from: d)
+        return resetFormatter.string(from: d)
     }
 
     static func day(_ epoch: Int?) -> String {
         guard let e = epoch else { return "?" }
-        let f = DateFormatter()
-        f.dateFormat = "MM-dd"
-        return f.string(from: Date(timeIntervalSince1970: TimeInterval(e)))
+        return dayFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(e)))
     }
 
     static func beijingTime(_ epoch: Int, full: Bool = false) -> String {
         let d = Date(timeIntervalSince1970: TimeInterval(epoch))
-        let f = DateFormatter()
-        f.timeZone = TimeZone(identifier: "Asia/Shanghai")
-        f.locale = Locale(identifier: "zh_CN")
-        f.dateFormat = full ? "yyyy-MM-dd HH:mm:ss" : "MM-dd HH:mm"
-        return f.string(from: d)
+        return (full ? beijingFullFormatter : beijingFormatter).string(from: d)
     }
 
     static func countdown(_ epoch: Int?) -> String {
@@ -1106,8 +1125,7 @@ enum Fmt {
     static func price(_ x: Double) -> String { String(format: "%g", x) }
 
     static func relativeDate(_ iso: String) -> String {
-        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
-        guard let d = f.date(from: iso) else { return iso }
+        guard let d = isoDayFormatter.date(from: iso) else { return iso }
         let days = Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: d),
                                                     to: Calendar.current.startOfDay(for: Date())).day ?? 0
         if days == 0 { return "今天" }

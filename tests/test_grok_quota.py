@@ -125,6 +125,51 @@ class GrokQuotaTests(unittest.TestCase):
         self.assertFalse(quota["stale"])
         self.assertIsNotNone(quota["reset"])
 
+    def test_unchanged_log_is_not_scanned_twice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure(root)
+            write_jsonl(Path(USAGE.GROK_LOG), [
+                self.billing_line(
+                    44.0,
+                    "2026-07-14T08:24:06+00:00",
+                    "2026-07-21T08:24:06+00:00",
+                    ts="2026-07-19T02:00:00+00:00",
+                ),
+            ])
+            import builtins
+            real_open = builtins.open
+            log_reads = []
+
+            def counting_open(file, *args, **kwargs):
+                if str(file) == USAGE.GROK_LOG:
+                    log_reads.append(str(file))
+                return real_open(file, *args, **kwargs)
+
+            first = USAGE._scan_grok_billing_from_log()
+            self.assertIsNotNone(first)
+            # 文件 (size, mtime_ns) 未变:第二次调用直接命中 grok_quota_cache.json
+            # 里的 log_scan 缓存,不再读 unified.jsonl。
+            with mock.patch("builtins.open", counting_open):
+                second = USAGE._scan_grok_billing_from_log()
+            self.assertEqual(log_reads, [])
+            self.assertEqual(second, first)
+
+            # 文件追加内容后签名变化,必须重新扫描。
+            with mock.patch("builtins.open", counting_open):
+                with real_open(USAGE.GROK_LOG, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(self.billing_line(
+                        55.0,
+                        "2026-07-14T08:24:06+00:00",
+                        "2026-07-21T08:24:06+00:00",
+                        ts="2026-07-19T03:00:00+00:00",
+                    )) + "\n")
+                log_reads.clear()
+                third = USAGE._scan_grok_billing_from_log()
+            self.assertEqual(len(log_reads), 1)
+
+        self.assertEqual(third["pct"], 55.0)
+
     def test_missing_percent_requires_complete_unified_period(self):
         quota = USAGE._normalize_grok_billing({
             "currentPeriod": {

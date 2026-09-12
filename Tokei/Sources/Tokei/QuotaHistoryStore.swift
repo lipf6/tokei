@@ -149,6 +149,9 @@ final class QuotaHistoryStore: ObservableObject {
     private let fileURL: URL
     private let retentionSeconds: Int
     private var state: QuotaHistoryState
+    private let saveQueue = DispatchQueue(label: "tokei.quota-history-save")
+    private var saveWorkItem: DispatchWorkItem?
+    private var terminateObserver: NSObjectProtocol?
 
     init(
         fileURL: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -159,6 +162,20 @@ final class QuotaHistoryStore: ObservableObject {
         retentionSeconds = max(24, retentionHours) * 60 * 60
         state = Self.loadState(from: fileURL)
         points = state.points.sorted { $0.timestamp < $1.timestamp }
+        // 防抖窗口内退出最多丢几秒数据,退出前做最后一次同步落盘兜底。
+        // 用字符串通知名,本文件被测试单独编译时不依赖 AppKit。
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name("NSApplicationWillTerminateNotification"),
+            object: nil, queue: nil
+        ) { [weak self] _ in
+            self?.flushPendingSave()
+        }
+    }
+
+    deinit {
+        if let terminateObserver {
+            NotificationCenter.default.removeObserver(terminateObserver)
+        }
     }
 
     func record(_ capture: QuotaCapture, at date: Date = Date()) {
@@ -275,7 +292,7 @@ final class QuotaHistoryStore: ObservableObject {
 
         if changed || nextClaudeBaseline.changed || nextCodexBaseline.changed || nextKimiBaseline.changed {
             state.points = points
-            saveState()
+            scheduleSave()
         }
     }
 
@@ -302,7 +319,27 @@ final class QuotaHistoryStore: ObservableObject {
         }
     }
 
-    private func saveState() {
+    // 落盘挪到后台串行队列并加 3s 防抖:合并一分钟内的多次变更,
+    // 不再每分钟在主线程做全量 JSONEncoder + 原子写。
+    private func scheduleSave() {
+        saveWorkItem?.cancel()
+        let snapshot = state
+        let item = DispatchWorkItem { [weak self] in
+            self?.writeState(snapshot)
+        }
+        saveWorkItem = item
+        saveQueue.asyncAfter(deadline: .now() + 3, execute: item)
+    }
+
+    /// 取消待执行的防抖写入,立刻把当前状态同步落盘(退出前/测试用)。
+    func flushPendingSave() {
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        let snapshot = state
+        saveQueue.sync { writeState(snapshot) }
+    }
+
+    private func writeState(_ state: QuotaHistoryState) {
         let directory = fileURL.deletingLastPathComponent()
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

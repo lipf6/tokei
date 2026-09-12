@@ -222,6 +222,7 @@ final class Store: ObservableObject {
         guard syncEnabled else { return }
         autoSyncTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60),
                                              repeats: true) { [weak self] _ in self?.doSync() }
+        autoSyncTimer?.tolerance = 5
         let startupWorkItem = DispatchWorkItem { [weak self] in
             self?.autoSyncStartupWorkItem = nil
             self?.doSync()
@@ -302,6 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             self?.store.refresh()
         }
+        timer?.tolerance = 5
         Timer.scheduledTimer(withTimeInterval: Updater.automaticCheckInterval, repeats: true) { _ in
             Updater.shared.checkForUpdate()
         }

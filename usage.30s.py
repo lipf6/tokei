@@ -298,15 +298,57 @@ def _deepseek_official_price(model, at=None):
     return dict(price) if price else None
 
 
+# 落盘/解析失败的留痕:compute() 末尾并入 result["_errors"],不再完全静默。
+_PERSISTENCE_ERRORS = []
+
+
 def _load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+    except FileNotFoundError:
+        return default                     # 缺失是正常状态(如缓存尚未生成)
+    except json.JSONDecodeError as e:
+        # 损坏与缺失不同:留痕提示,调用方仍拿到 default
+        _PERSISTENCE_ERRORS.append(f"{os.path.basename(path)}: JSONDecodeError: {e}")
+        return default
     except Exception:
         return default
 
 
-_PRICING_DB = _load_json(PRICING_FILE, {}).get("models", {})
+def _last_good_pricing_effective():
+    """pricing.json 损坏时,从 scan cache 恢复上次成功的有效定价表。
+
+    此时 _PRICING_DB 已退化为空,若直接用内置价重算指纹,会触发全缓存按错误
+    价格 reprice;恢复后的表与缓存里的 _pricing_effective 一致,指纹不切换。
+    """
+    try:
+        cache_path = os.path.join(
+            os.environ.get("TOKEI_CACHE_DIR") or os.path.join(HOME, ".tokei", "cache"),
+            "scan_cache.json")
+        with open(cache_path, "r") as f:
+            effective = json.load(f).get("_pricing_effective")
+        return effective if isinstance(effective, dict) and effective else None
+    except Exception:
+        return None
+
+
+def _load_pricing_db():
+    """pricing.json:缺失→{}(内置价兜底,正常);损坏→留痕并尝试恢复上次定价。"""
+    try:
+        with open(PRICING_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("models", {}) if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        _PERSISTENCE_ERRORS.append(f"pricing.json: JSONDecodeError: {e}")
+        return _last_good_pricing_effective() or {}
+    except OSError:
+        return {}
+
+
+_PRICING_DB = _load_pricing_db()
 
 # 已安装版本会保留用户自己的 pricing_overrides.json。关键官方修正也随脚本内置，
 # 这样升级后立即生效；用户仍可覆盖单价，已确认的官方别名保持固定映射。
@@ -844,13 +886,13 @@ def _save_scan_cache(cache):
             f.write(payload)
         os.chmod(tmp, 0o600)
         os.replace(tmp, _SCAN_CACHE_FILE)
-    except Exception:
+    except Exception as e:
         if tmp:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
-        pass
+        _PERSISTENCE_ERRORS.append(f"scan_cache: {type(e).__name__}: {e}")
 
 
 # ---------- 持久账本(每日高水位) ----------
@@ -952,12 +994,13 @@ def _save_ledger(ledger):
             json.dump(ledger, f, separators=(',', ':'))
         os.chmod(tmp, 0o600)
         os.replace(tmp, _LEDGER_FILE)
-    except Exception:
+    except Exception as e:
         if tmp:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
+        _PERSISTENCE_ERRORS.append(f"ledger: {type(e).__name__}: {e}")
 
 
 def _ledger_day_total(day):
@@ -1446,53 +1489,55 @@ def scan_claude(bounds, cache):
         fc.pop(p, None)
         changed = True
 
-    all_events = []
-    for path, entry in fc.items():
-        for event in entry.get("events", []):
-            all_events.append((path, event))
-    selected_events = _dedupe_claude_events(all_events)
+    # 文件签名、repricing、stale 清理都没置 changed 时,缓存事件的天级聚合
+    # 与上一轮一致,跳过重聚合(dedupe + 逐事件聚合是本函数的主要开销)。
+    if changed:
+        all_events = []
+        for path, entry in fc.items():
+            for event in entry.get("events", []):
+                all_events.append((path, event))
+        selected_events = _dedupe_claude_events(all_events)
 
-    aggregates = {
-        path: {"days": {}, "hours": [0] * 24, "day_hours": {}, "dh": set(),
-               "proj": entry.get("proj")}
-        for path, entry in fc.items()
-    }
-    for path, event in selected_events:
-        dt = parse_ts(event.get("timestamp", ""))
-        if dt is None:
-            continue
-        dt = dt.astimezone()
-        day_key = dt.date().isoformat()
-        aggregate = aggregates[path]
-        if not aggregate["proj"] and event.get("cwd"):
-            aggregate["proj"] = event["cwd"]
-        day = aggregate["days"].setdefault(
-            day_key, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}})
-        day["in"] += event["in"]; day["out"] += event["out"]
-        day["cr"] += event["cr"]; day["cw"] += event["cw"]
-        day["cost"] += event["cost"]
-        model = event.get("model") or "unknown"
-        model_usage = day["models"].setdefault(
-            model, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
-        model_usage["in"] += event["in"]; model_usage["out"] += event["out"]
-        model_usage["cr"] += event["cr"]; model_usage["cw"] += event["cw"]
-        model_usage["cost"] += event["cost"]
-        amount = _claude_event_total(event)
-        aggregate["hours"][dt.hour] += amount
-        aggregate["day_hours"].setdefault(day_key, [0] * 24)[dt.hour] += amount
-        aggregate["dh"].add(f"{day_key}:{dt.hour}")
-
-    for path, aggregate in aggregates.items():
-        entry = fc[path]
-        values = {
-            "days": aggregate["days"], "hours": aggregate["hours"],
-            "day_hours": aggregate["day_hours"], "dh": sorted(aggregate["dh"]),
-            "proj": aggregate["proj"],
+        aggregates = {
+            path: {"days": {}, "hours": [0] * 24, "day_hours": {}, "dh": set(),
+                   "proj": entry.get("proj")}
+            for path, entry in fc.items()
         }
-        for key, value in values.items():
-            if entry.get(key) != value:
-                entry[key] = value
-                changed = True
+        for path, event in selected_events:
+            dt = parse_ts(event.get("timestamp", ""))
+            if dt is None:
+                continue
+            dt = dt.astimezone()
+            day_key = dt.date().isoformat()
+            aggregate = aggregates[path]
+            if not aggregate["proj"] and event.get("cwd"):
+                aggregate["proj"] = event["cwd"]
+            day = aggregate["days"].setdefault(
+                day_key, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0, "models": {}})
+            day["in"] += event["in"]; day["out"] += event["out"]
+            day["cr"] += event["cr"]; day["cw"] += event["cw"]
+            day["cost"] += event["cost"]
+            model = event.get("model") or "unknown"
+            model_usage = day["models"].setdefault(
+                model, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
+            model_usage["in"] += event["in"]; model_usage["out"] += event["out"]
+            model_usage["cr"] += event["cr"]; model_usage["cw"] += event["cw"]
+            model_usage["cost"] += event["cost"]
+            amount = _claude_event_total(event)
+            aggregate["hours"][dt.hour] += amount
+            aggregate["day_hours"].setdefault(day_key, [0] * 24)[dt.hour] += amount
+            aggregate["dh"].add(f"{day_key}:{dt.hour}")
+
+        for path, aggregate in aggregates.items():
+            entry = fc[path]
+            values = {
+                "days": aggregate["days"], "hours": aggregate["hours"],
+                "day_hours": aggregate["day_hours"], "dh": sorted(aggregate["dh"]),
+                "proj": aggregate["proj"],
+            }
+            for key, value in values.items():
+                if entry.get(key) != value:
+                    entry[key] = value
 
     if changed:
         cache["_dirty"] = True
@@ -4276,11 +4321,25 @@ def _scan_grok_billing_from_log(path=None, max_bytes=_GROK_QUOTA_LOG_SCAN_BYTES)
     """从 unified.jsonl 尾部读取最近一次 billing: fetched credits config。"""
     log_path = path or GROK_LOG
     try:
-        size = os.path.getsize(log_path)
+        st = os.stat(log_path)
     except OSError:
         return None
-    if size <= 0:
+    if st.st_size <= 0:
         return None
+    # billing 事件极稀疏,而日志本身可达数 MB。默认路径下把最近一次扫描提取的
+    # 原始 payload 按 (size, mtime_ns) 并进 grok_quota_cache.json,文件未变即跳过
+    # 扫描;命中时重新归一化(stale 判定随时间变化,不能直接缓存归一化结果)。
+    sig = [st.st_size, st.st_mtime_ns]
+    if path is None:
+        entry = (_load_json(GROK_QUOTA_CACHE, {}) or {}).get("log_scan")
+        if isinstance(entry, dict) and entry.get("sig") == sig:
+            latest = entry.get("latest")
+            if not isinstance(latest, dict):
+                return None
+            return _normalize_grok_billing(
+                latest.get("config"), plan=latest.get("plan"), source="log",
+                updated=_iso_to_epoch(latest.get("ts")))
+    size = st.st_size
     start = max(0, size - max_bytes)
     latest = None
     latest_ts = None
@@ -4314,6 +4373,9 @@ def _scan_grok_billing_from_log(path=None, max_bytes=_GROK_QUOTA_LOG_SCAN_BYTES)
                     }
     except OSError:
         return None
+    if path is None:
+        # latest 为 None 时同样缓存签名:无 billing 事件的日志不必每轮重扫。
+        _update_grok_quota_cache({"log_scan": {"sig": sig, "latest": latest}})
     if not latest:
         return None
     updated = _iso_to_epoch(latest.get("ts"))
@@ -4343,13 +4405,22 @@ def _cached_grok_quota(max_age):
 def _save_grok_quota_cache(quota):
     if not isinstance(quota, dict) or quota.get("pct") is None:
         return
+    _update_grok_quota_cache({
+        "fetched_at": datetime.now().timestamp(),
+        "source": quota.get("source"),
+        "quota": quota,
+    })
+
+
+def _update_grok_quota_cache(fields):
+    """合并写入 grok_quota_cache.json,保留其他字段(如 log_scan 的扫描签名)。"""
     try:
         os.makedirs(os.path.dirname(GROK_QUOTA_CACHE) or _USER_DIR, exist_ok=True)
-        _atomic_write_json(GROK_QUOTA_CACHE, {
-            "fetched_at": datetime.now().timestamp(),
-            "source": quota.get("source"),
-            "quota": quota,
-        })
+        state = _load_json(GROK_QUOTA_CACHE, {})
+        if not isinstance(state, dict):
+            state = {}
+        state.update(fields)
+        _atomic_write_json(GROK_QUOTA_CACHE, state)
         try:
             os.chmod(GROK_QUOTA_CACHE, 0o600)
         except OSError:
@@ -10692,7 +10763,6 @@ def compute():
         cache["_pricing_effective"] = _PRICING_EFFECTIVE
         cache["_pricing_aliases"] = _OV_ALIASES
         cache["_dirty"] = True
-    _save_scan_cache(cache)
     ledger_flush()
 
     def claude_range(b):
@@ -10981,6 +11051,10 @@ def compute():
             "q_error": kimi_quota.get("error"),
         },
     }
+    if _PERSISTENCE_ERRORS:
+        # 去重后并入错误表,落盘/解析失败不再静默
+        errors = dict(errors)
+        errors["persistence"] = "; ".join(dict.fromkeys(_PERSISTENCE_ERRORS))
     if errors:
         result["_errors"] = errors
     _recalc_costs(result)
