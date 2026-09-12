@@ -236,6 +236,18 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.45
+
+- perf: Dashboard 隐藏时不再每 30 秒空跑 python 进程；额度历史落盘改防抖 + 后台写
+- perf: Grok 账单日志按签名缓存；Claude 日志无变化时跳过重聚合；scan_cache 每轮只写一次
+- fix: scan_cache/账本写失败记入诊断错误；pricing.json 损坏时恢复上次有效定价，不再按内置价错误重算
+- docs: 安装入口改指 lipf6/tokei；release.sh 打包前跑测试门禁
+
+### v1.0.44
+
+- feat: 「显示卡片」关掉 Claude 后，周额度 tab/卡片、额度轨迹、最近额度变化与菜单栏 Claude 额度来源一并隐藏，历史数据照常记录
+- feat: 合并上游 v1.0.40，完善 Qoder 用量统计与模型定价
+
 ### v1.0.43
 
 - feat: 合并上游 v1.0.39，模型定价刷新至 456 个模型（claude-fable-5.1 / sonnet-5 / gpt-5.6 系列 / qwen3.8-max / grok-4.6 等）
@@ -243,11 +255,6 @@ chmod +x ~/.tokei/tokei-sync.sh
 - fix: Grok 4.6 提示达到 200K 后整请求按双倍价格计费
 - fix: 模型价格表变化后按定价指纹自动重算成本缓存，不再沿用旧价
 - chore: Codex 重置卡自动查询间隔从 24 小时缩短为 6 小时，最近一张卡到期后立即更新
-
-### v1.0.44
-
-- feat: 「显示卡片」关掉 Claude 后，周额度 tab/卡片、额度轨迹、最近额度变化与菜单栏 Claude 额度来源一并隐藏，历史数据照常记录
-- feat: 合并上游 v1.0.40，完善 Qoder 用量统计与模型定价
 
 ### v1.0.42
 
