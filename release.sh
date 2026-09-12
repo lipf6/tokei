@@ -5,8 +5,14 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 REPO="lipf6/tokei"
-NOTES="${2:-}"
-[ "${1:-}" = "--notes" ] || NOTES=""
+NOTES=""
+if [ $# -gt 0 ]; then
+    if [ "$1" != "--notes" ] || [ $# -gt 2 ]; then
+        echo "用法: $0 [--notes \"版本说明\"]" >&2
+        exit 1
+    fi
+    NOTES="${2:-}"
+fi
 
 VERSION="$(sed -nE 's/.*releaseTag = "v([^"]+)".*/\1/p' Tokei/Sources/Tokei/Updater.swift | head -n 1)"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "❌ 无法从 Updater.swift 读取版本号"; exit 1; }
@@ -24,6 +30,11 @@ git fetch -q origin "$BRANCH"
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
     echo "❌ $REPO 已存在 $TAG"; exit 1
 fi
+
+echo "==> 运行测试"
+TEST_PY=".venv-test/bin/python"
+[ -x "$TEST_PY" ] || { echo "❌ 缺少 $TEST_PY，请先创建测试虚拟环境（python3 -m venv .venv-test 并安装 pytest）"; exit 1; }
+"$TEST_PY" -m pytest tests/ -x -q
 
 echo "==> 打包"
 # 公开发布固定 ad-hoc 签名：发布产物不能取决于构建机上恰好装了哪张个人证书。

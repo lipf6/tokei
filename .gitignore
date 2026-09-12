@@ -10,3 +10,9 @@ __pycache__/
 tokei-article.md
 Tokei-feature/
 .qoder/
+.venv-test/
+.pytest_cache/
+.idea/misc.xml
+.idea/modules.xml
+.idea/tokei.iml
+.idea/vcs.xml

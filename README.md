@@ -12,7 +12,7 @@
 <p align="center">
   <strong>macOS 菜单栏 AI 编程用量监控</strong><br>
   <sub>了然于心，掌控全局。</sub><br><br>
-  <a href="https://tokei.lanshuagent.com">🌐 官网</a> · <a href="https://github.com/cclank/tokei/releases/latest">⬇️ 下载</a> · <a href="#english">English</a>
+  <a href="https://tokei.lanshuagent.com">🌐 官网</a> · <a href="https://github.com/lipf6/tokei/releases/latest">⬇️ 下载</a> · <a href="#english">English</a>
 </p>
 
 ---
@@ -112,7 +112,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 
 ## 快速开始
 
-1. 从 [GitHub Releases](https://github.com/cclank/tokei/releases/latest) 下载最新 DMG
+1. 从 [GitHub Releases](https://github.com/lipf6/tokei/releases/latest) 下载最新 DMG
 2. 打开 DMG，将 Tokei.app 拖入 Applications 文件夹
 3. 首次打开如被 macOS 拦截，在终端运行：`sudo xattr -rd com.apple.quarantine /Applications/Tokei.app`
 4. 打开 Tokei 即可
@@ -121,7 +121,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 <summary>从源码构建</summary>
 
 ```bash
-git clone https://github.com/cclank/tokei.git
+git clone https://github.com/lipf6/tokei.git
 cd tokei/Tokei
 bash package.sh
 open Tokei.app
@@ -145,7 +145,7 @@ Tokei 支持通过私有 Git 仓库在多台机器间同步用量数据。
 
 ```bash
 git clone <你的私有仓库> ~/.tokei/sync
-curl -fsSL https://dl.lanshuagent.com/tokei/usage.30s.py -o ~/.tokei/usage.30s.py
+curl -fsSL https://raw.githubusercontent.com/lipf6/tokei/main/usage.30s.py -o ~/.tokei/usage.30s.py
 echo '{"sync_dir":"~/.tokei/sync","device_id":"'$(hostname -s)'","auto_sync":true,"sync_interval":30}' > ~/.tokei/config.json
 cat > ~/.tokei/tokei-sync.sh <<'SH'
 #!/bin/bash
@@ -235,6 +235,14 @@ chmod +x ~/.tokei/tokei-sync.sh
 ## 更新日志
 
 ### Unreleased
+
+### v1.0.43
+
+- feat: 合并上游 v1.0.39，模型定价刷新至 456 个模型（claude-fable-5.1 / sonnet-5 / gpt-5.6 系列 / qwen3.8-max / grok-4.6 等）
+- feat: DeepSeek 官方直连 2026-08-16 起按工作日峰谷时段计价，新旧价按调用时间自动切换
+- fix: Grok 4.6 提示达到 200K 后整请求按双倍价格计费
+- fix: 模型价格表变化后按定价指纹自动重算成本缓存，不再沿用旧价
+- chore: Codex 重置卡自动查询间隔从 24 小时缩短为 6 小时，最近一张卡到期后立即更新
 
 ### v1.0.44
 

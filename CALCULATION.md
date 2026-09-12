@@ -295,10 +295,12 @@ Pi 优先使用会话 JSONL 中的 `usage.cost.total`；OpenCode 优先读取 SQ
 
 兼容 Codex 新旧返回结构:旧结构通常是 primary=5h、secondary=周;新结构可能只有 primary=周。
 
-重置卡使用当前 Codex 登录态只读查询
-`/backend-api/wham/rate-limit-reset-credits`。本地仅缓存可用数量和到期时间，不保存卡片
-ID、邀请信息或个人资料；每天最多自动查询一次，最近一张卡到期后立即更新，失败后
-6 小时再试。未登录或仅使用 API Key 时不请求；401/403 静默隐藏或沿用未过期缓存，
+重置卡优先通过本机 Codex App Server 的 `account/rateLimits/read` RPC 读取（复用已安装的
+`codex` 二进制，登录 Token 不经由 Tokei 暴露）；App Server 不可用时回退到 legacy 的
+`/backend-api/wham/rate-limit-reset-credits` 接口，使用当前 Codex 登录态只读查询。
+本地仅缓存可用数量和到期时间，不保存卡片 ID、邀请信息或个人资料；两次自动查询至少
+间隔 6 小时，最近一张卡到期后立即更新，失败后 6 小时再试（404/410 视为接口不再支持，
+按常规间隔重试）。未登录或仅使用 API Key 时不请求；401/403 静默隐藏或沿用未过期缓存，
 Codex 刷新登录 Token 后立即重试。
 
 ### Grok Build(credits)
@@ -369,6 +371,28 @@ Keychain 查询，授权失效时静默降级。成功结果缓存 5 分钟，�
 - 结果使用短缓存降低查询频率；实时查询失败时可显示标记为缓存来源的最近结果
 
 千问办公首版只有绝对积分时不加入以百分比为口径的菜单栏额度源，额度在独立卡片展示。
+
+### Kimi Code（官方额度，需联网，默认开启）
+
+使用本机 Kimi Code 登录态查询官方额度，默认开启。可通过设置页「Kimi 实时额度查询」
+开关关闭，也可使用配置或环境变量：
+
+- `~/.tokei/config.json` 中 `kimi_live_quota_enabled: false`
+- `TOKEI_KIMI_LIVE_QUOTA=0` 关闭；`TOKEI_KIMI_LIVE_QUOTA=1` 强制开启（优先于 config）
+
+开启后，Tokei 读取 `${KIMI_CODE_HOME:-~/.kimi-code}/credentials/kimi-code.json` 中的
+OAuth 凭据；access token 临期时先用 refresh token 自动续期并原子写回凭据文件（带文件锁，
+与其他进程协调，若凭据已被别的进程刷新则直接复用），再请求
+`GET https://api.kimi.com/coding/v1/usages`（校验重定向目标仍为该地址，响应上限 256 KB）。
+
+额度口径：
+
+- `weekly` — 周额度已用 / 上限与重置时间
+- `limits` — 各限额窗口明细（如 5 小时窗口），含名称、窗口长度、已用 / 上限与重置时间
+- `extra_usage` — `boosterWallet` 的 Extra Usage 余额与月度限额（仅 BOOSTER 类型且余额为正时展示）
+
+成功结果缓存 5 分钟；查询失败时最多沿用 24 小时内的缓存并标记为过期来源，
+未登录时静默降级，不影响本地 Token 统计。
 
 ### Qoder(credit)
 
