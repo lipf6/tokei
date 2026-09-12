@@ -236,6 +236,11 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.44
+
+- feat: 「显示卡片」关掉 Claude 后，周额度 tab/卡片、额度轨迹、最近额度变化与菜单栏 Claude 额度来源一并隐藏，历史数据照常记录
+- feat: 合并上游 v1.0.40，完善 Qoder 用量统计与模型定价
+
 ### v1.0.42
 
 - feat: 新增 Grok Bot 本地活动与授权后的官方 Token、模型、成本和额度统计
