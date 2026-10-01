@@ -16,13 +16,13 @@ enum MenuBarStyle: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .system: return "经典白"
-        case .color: return "彩色"
-        case .symbols: return "刻度"
-        case .dots: return "圆点"
-        case .compact: return "数字"
-        case .artistic: return "星轨"
-        case .palm: return "椰影"
+        case .system: return L("经典白")
+        case .color: return L("彩色")
+        case .symbols: return L("刻度")
+        case .dots: return L("圆点")
+        case .compact: return L("数字")
+        case .artistic: return L("星轨")
+        case .palm: return L("椰影")
         }
     }
 
@@ -43,9 +43,9 @@ enum MenuBarDensity: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .full: return "双额度"
-        case .lowest: return "单额度"
-        case .icon: return "仅图标"
+        case .full: return L("双额度")
+        case .lowest: return L("单额度")
+        case .icon: return L("仅图标")
         }
     }
 
@@ -69,6 +69,8 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     case claudeFable
     case codex5h
     case codexWeek
+    case kimi5h
+    case kimiSubscription
     case grok
     case kimi
 
@@ -77,12 +79,14 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .claude5h: return "Claude 5h"
-        case .claudeWeek: return "Claude 周"
+        case .claudeWeek: return L("Claude 周")
         case .claudeFable: return "Claude Fable"
         case .codex5h: return "Codex 5h"
-        case .codexWeek: return "Codex 周"
+        case .codexWeek: return L("Codex 周")
+        case .kimi5h: return "Kimi 5h"
+        case .kimiSubscription: return L("Kimi 订阅")
         case .grok: return "Grok"
-        case .kimi: return "Kimi 周"
+        case .kimi: return L("Kimi 周")
         }
     }
 
@@ -94,6 +98,8 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claudeFable: return "menuBarQuotaClaudeFable"
         case .codex5h: return "menuBarQuotaCodex5h"
         case .codexWeek: return "menuBarQuotaCodex"
+        case .kimi5h: return "menuBarQuotaKimi5h"
+        case .kimiSubscription: return "menuBarQuotaKimiSubscription"
         case .grok: return "menuBarQuotaGrok"
         case .kimi: return "menuBarQuotaKimi"
         }
@@ -103,7 +109,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     var defaultEnabled: Bool {
         switch self {
         case .claude5h, .codexWeek: return true
-        case .claudeWeek, .claudeFable, .codex5h, .grok, .kimi: return false
+        case .claudeWeek, .claudeFable, .codex5h, .kimi5h, .kimiSubscription, .grok, .kimi: return false
         }
     }
 
@@ -117,7 +123,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     var visibilityDefaultsKey: String? {
         switch self {
         case .claude5h, .claudeWeek, .claudeFable: return "showClaude"
-        case .codex5h, .codexWeek, .grok, .kimi: return nil
+        case .codex5h, .codexWeek, .kimi5h, .kimiSubscription, .grok, .kimi: return nil
         }
     }
 
@@ -131,9 +137,9 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
     /// Grok 的窗口随数据在周/月之间变，画不出确定的符号，所以不给它符号。
     var window: MenuBarQuotaWindow? {
         switch self {
-        case .claude5h, .codex5h: return .fiveHour
+        case .claude5h, .codex5h, .kimi5h: return .fiveHour
         case .claudeWeek, .claudeFable, .codexWeek, .kimi: return .week
-        case .grok: return nil
+        case .kimiSubscription, .grok: return nil
         }
     }
 
@@ -143,6 +149,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claude5h, .claudeWeek: return AppDelegate.claudeColor
         case .claudeFable: return .systemOrange
         case .codex5h, .codexWeek: return AppDelegate.codexColor
+        case .kimi5h, .kimiSubscription: return AppDelegate.kimicodeColor
         case .grok: return AppDelegate.grokColor
         case .kimi: return AppDelegate.kimiColor
         }
@@ -153,6 +160,7 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claude5h, .claudeWeek: return Theme.claude
         case .claudeFable: return .orange
         case .codex5h, .codexWeek: return Theme.codex
+        case .kimi5h, .kimiSubscription: return Theme.kimicode
         case .grok: return Theme.grok
         case .kimi: return Theme.kimicode
         }
@@ -166,27 +174,51 @@ enum MenuBarQuotaSource: String, CaseIterable, Identifiable {
         case .claudeFable: return (usage.claude.qf, usage.claude.qf_stale)
         case .codex5h: return (usage.codex.p5, usage.codex.p5_stale)
         case .codexWeek: return (usage.codex.pw, usage.codex.pw_stale)
+        case .kimi5h: return (usage.kimicode.p5, usage.kimicode.p5_stale)
+        case .kimiSubscription: return (usage.kimicode.pw, usage.kimicode.pw_stale)
         case .grok: return (usage.grok.pct, usage.grok.stale)
         case .kimi: return (usage.kimicode.weekly?.usedPercent, usage.kimicode.q_stale)
         }
     }
 
-    /// 现在能不能真在状态栏上写出一个数字：账号有这个窗口，读数也没过期。
-    /// 设置页的提示语和预览必须用同一个判断，否则会描述一个状态栏没画的组合。
-    func isRenderable(in usage: Usage) -> Bool {
-        let reading = reading(in: usage)
-        return reading.value != nil && reading.stale != true
+    /// 该窗口的重置时刻（unix 秒）。
+    func reset(in usage: Usage) -> Int? {
+        switch self {
+        case .claude5h: return usage.claude.q5_reset
+        case .claudeWeek: return usage.claude.q7_reset
+        case .claudeFable: return usage.claude.qf_reset
+        case .codex5h: return usage.codex.r5
+        case .codexWeek: return usage.codex.rw
+        case .kimi5h: return usage.kimicode.r5
+        case .kimiSubscription: return usage.kimicode.rw
+        case .grok: return usage.grok.reset
+        case .kimi: return usage.kimicode.weekly?.reset_at
+        }
     }
 
-    /// 勾选中、未被卡片开关隐藏且数据新鲜的窗口，按 `allCases` 顺序排好。模型里存的是已用百分比，这里换成剩余。
+    /// 状态栏上有没有这一项：账号有这个窗口就有。读数过期也照常占位（和卡片一样保留
+    /// 最后一次读数），不再整项消失——应用退出一晚、工具久没用，读数自然会过期。
+    /// 设置页的提示语和预览必须用同一个判断，否则会描述一个状态栏没画的组合。
+    func isRenderable(in usage: Usage) -> Bool {
+        reading(in: usage).value != nil
+    }
+
+    /// 勾选中、未被卡片开关隐藏的窗口，按 `allCases` 顺序排好。模型里存的是已用百分比，这里换成剩余。
+    /// 过期的读数照常显示（变淡）；窗口已经重置的不拿上一个窗口的数冒充，写「—」。
     static func metrics(in usage: Usage) -> [MenuBarMetric] {
         allCases.compactMap { source in
+            let reading = source.reading(in: usage)
             guard source.isVisible, source.isEnabled, source.isRenderable(in: usage),
-                  let used = source.reading(in: usage).value else { return nil }
+                  let used = reading.value else { return nil }
+            let stale = reading.stale == true
+            if SubscriptionQuotaPresentation.hasResetSinceReading(
+                stale: stale, reset: source.reset(in: usage)) {
+                return MenuBarMetric(kind: .quota(source), value: "—", remaining: nil, stale: true)
+            }
             let remaining = 100 - used
             return MenuBarMetric(kind: .quota(source),
                                  value: String(format: "%.0f", remaining),
-                                 remaining: remaining)
+                                 remaining: remaining, stale: stale)
         }
     }
 }
@@ -198,7 +230,7 @@ enum MenuBarMetricKind: Equatable {
     var displayName: String {
         switch self {
         case .quota(let source): return source.label
-        case .total: return "今日"
+        case .total: return L("今日")
         }
     }
 
@@ -228,6 +260,8 @@ struct MenuBarMetric {
     var kind: MenuBarMetricKind
     var value: String
     var remaining: Double? = nil
+    /// 过期读数：数字照常写，颜色变淡。窗口已重置时 value 为「—」、remaining 为 nil。
+    var stale = false
 }
 
 enum MenuBarArtwork {
@@ -707,7 +741,8 @@ enum MenuBarTitleRenderer {
 
     private static func appendDecorated(_ metric: MenuBarMetric, to title: NSMutableAttributedString,
                                         style: MenuBarStyle) {
-        let familyColor = metric.kind.nsColor
+        let familyColor = metric.stale ? metric.kind.nsColor.withAlphaComponent(staleAlpha)
+                                       : metric.kind.nsColor
         switch style {
         case .symbols:
             appendArtwork(MenuBarArtwork.gauge(remaining: metric.remaining, color: familyColor,
@@ -733,12 +768,15 @@ enum MenuBarTitleRenderer {
         }
     }
 
+    /// 过期读数的透明度：还看得清，但一眼能和新鲜读数分开。
+    private static let staleAlpha: CGFloat = 0.45
+
     private static func appendValue(_ metric: MenuBarMetric, color: NSColor,
                                     to title: NSMutableAttributedString) {
         title.append(NSAttributedString(string: metric.value, attributes: [
             .font: valueFont,
             .baselineOffset: 1,
-            .foregroundColor: color,
+            .foregroundColor: metric.stale ? color.withAlphaComponent(staleAlpha) : color,
         ]))
     }
 
@@ -791,8 +829,12 @@ enum MenuBarTitleRenderer {
 
     private static func focusedMetric(in metrics: [MenuBarMetric]) -> MenuBarMetric? {
         let quotas = metrics.filter { $0.remaining != nil }
-        if !quotas.isEmpty {
-            return quotas.min { ($0.remaining ?? 0) < ($1.remaining ?? 0) }
+        // 单额度挑剩得最少的：先在新鲜读数里挑，别让一个过期的旧数字把它挤掉
+        let fresh = quotas.filter { !$0.stale }
+        if let lowest = (fresh.isEmpty ? quotas : fresh).min(by: {
+            ($0.remaining ?? 0) < ($1.remaining ?? 0)
+        }) {
+            return lowest
         }
         return metrics.first
     }
@@ -850,7 +892,7 @@ struct MenuBarStylePreview: View {
         HStack(spacing: style == .compact ? 5 : 6) { previewContent }
         .font(.system(size: 10, weight: .semibold, design: .monospaced))
         .frame(height: 20)
-        .accessibilityLabel("\(style.label)菜单栏预览")
+        .accessibilityLabel(L("%@菜单栏预览", style.label))
     }
 
     @ViewBuilder

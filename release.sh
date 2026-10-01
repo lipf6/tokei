@@ -37,8 +37,9 @@ TEST_PY=".venv-test/bin/python"
 "$TEST_PY" -m pytest tests/ -x -q
 
 echo "==> 打包"
-# 公开发布固定 ad-hoc 签名：发布产物不能取决于构建机上恰好装了哪张个人证书。
-( cd Tokei && TOKEI_CODESIGN_IDENTITY=- ./package.sh )
+# 公开发布固定 ad-hoc 签名：package.sh 的自动探测是给本地开发保 Keychain ACL 的,
+# 发布产物不能取决于构建机上恰好装了哪张个人证书。
+( cd Tokei && TOKEI_LOCAL_BUILD=0 TOKEI_CODESIGN_IDENTITY=- ./package.sh ) | grep -E 'Built|DMG|metadata' || true
 DMG="Tokei/Tokei.dmg"
 [ -f "$DMG" ] || { echo "❌ DMG 未生成"; exit 1; }
 LOCAL_SHA="$(shasum -a 256 "$DMG" | awk '{print $1}')"

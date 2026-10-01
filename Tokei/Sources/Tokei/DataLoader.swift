@@ -18,6 +18,9 @@ final class DataLoader {
             let bundledScript = (bundled as NSString).appendingPathComponent("usage.30s.py")
             if FileManager.default.fileExists(atPath: bundledScript) {
                 syncToUserDir(from: bundled)
+                // App 与采集逻辑随同一个安装包运行。用户目录的脚本供独立 CLI 使用，
+                // 可能由其他版本安装包写入，不能用它替换当前 App 的采集逻辑。
+                return bundledScript
             }
         }
         return userScript
@@ -28,29 +31,11 @@ final class DataLoader {
 
     private static func syncToUserDir(from resourceDir: String) {
         let dest = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".tokei")
-        try? FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
-        let markerPath = dest.appendingPathComponent("script.version").path
-        let bundledTag = Updater.releaseTag
-        for name in ["usage.30s.py", "pricing.json", "pricing_overrides.json"] {
-            let src = (resourceDir as NSString).appendingPathComponent(name)
-            let dst = dest.appendingPathComponent(name).path
-            guard FileManager.default.fileExists(atPath: src) else { continue }
-            if name == "usage.30s.py" {
-                // 只升不降:旧版 app 启动不得用旧脚本覆盖新版脚本
-                if FileManager.default.fileExists(atPath: dst),
-                   let recorded = try? String(contentsOfFile: markerPath, encoding: .utf8)
-                       .trimmingCharacters(in: .whitespacesAndNewlines),
-                   !recorded.isEmpty,
-                   UpdateSecurity.isNewerVersion(recorded, than: bundledTag) {
-                    continue
-                }
-                try? FileManager.default.removeItem(atPath: dst)
-                try? FileManager.default.copyItem(atPath: src, toPath: dst)
-                try? bundledTag.write(toFile: markerPath, atomically: true, encoding: .utf8)
-            } else if !FileManager.default.fileExists(atPath: dst) {
-                try? FileManager.default.copyItem(atPath: src, toPath: dst)
-            }
-        }
+        CollectorScriptInstaller.sync(
+            resourceDir: resourceDir,
+            userDir: dest,
+            bundledRelease: Updater.releaseTag
+        )
     }
 
     // 首次全量定位 /usage，之后只检查变化项并复用最近一次有效候选。
@@ -81,7 +66,7 @@ final class DataLoader {
     }
 
     private struct ClaudeQuotaState: Codable, Equatable {
-        var version = 2
+        var version = 3
         var candidate: ClaudeQuotaCandidate?
         var snapshot: ClaudeQuotaSnapshot?
         var scanModified: TimeInterval = -1
@@ -93,6 +78,10 @@ final class DataLoader {
     private static let claudeQuotaFullScanInterval = 6 * 60 * 60
     private static let claudeQuotaRetryScanInterval = 5 * 60
     private static let claudeCacheFileLimit = 16 * 1024 * 1024
+    /// 修改时间晚于「现在 + 5 分钟」的缓存文件不可信（实机见过 2037 年的残留）：
+    /// 记成水位线后真正的新文件永远比它旧，增量扫描就此失效。这类文件当作还不存在，
+    /// 不解析也不参与水位线；与采集器的 _CLAUDE_QUOTA_FUTURE_SKEW 同一口径。
+    private static let claudeQuotaFutureSkew: TimeInterval = 5 * 60
     private static let claudeQuotaScanLock = NSLock()
     private static let zstdMagic = Data([0x28, 0xb5, 0x2f, 0xfd])
     private static let deepSeekPreparationLock = NSLock()
@@ -146,7 +135,7 @@ final class DataLoader {
     private static func loadClaudeQuotaState() -> ClaudeQuotaState {
         guard let data = try? Data(contentsOf: claudeQuotaStateURL),
               let state = try? JSONDecoder().decode(ClaudeQuotaState.self, from: data),
-              state.version == 2 else { return ClaudeQuotaState() }
+              state.version == 3 else { return ClaudeQuotaState() }
         return state
     }
 
@@ -228,7 +217,8 @@ final class DataLoader {
         claudeQuotaScanLock.lock()
         defer { claudeQuotaScanLock.unlock() }
         let nowEpoch = Int(now.timeIntervalSince1970)
-        let records = claudeCacheRecords()
+        let horizon = now.timeIntervalSince1970 + claudeQuotaFutureSkew
+        let records = claudeCacheRecords().filter { $0.modified <= horizon }
         var recordsByPath: [String: ClaudeCacheRecord] = [:]
         for record in records { recordsByPath[record.url.path] = record }
         let original = loadClaudeQuotaState()
@@ -659,11 +649,15 @@ final class DataLoader {
         return "/usr/bin/env"
     }()
 
+    /// 这段脚本以模块方式导入 App 包里的采集器。不关掉字节码缓存的话，Python 会把
+    /// __pycache__ 写进 Contents/Resources，App 签名随即失效
+    /// （codesign: a sealed resource is missing or invalid）。
     private static let syncSnapshotPython = """
     import importlib.util
     import os
     import sys
 
+    sys.dont_write_bytecode = True
     script_path, device_id, sync_dir, claude_quota = sys.argv[1:5]
     if claude_quota:
         os.environ["TOKEI_CLAUDE_QUOTA_JSON"] = claude_quota

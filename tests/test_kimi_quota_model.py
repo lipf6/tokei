@@ -19,6 +19,7 @@ class KimiQuotaModelTests(unittest.TestCase):
                     "-module-name",
                     "KimiQuotaModelCheck",
                     str(TOKEI_SRC / "Model.swift"),
+                    str(TOKEI_SRC / "L10n.swift"),
                     str(ROOT / "tests/swift/KimiQuotaModelCheck.swift"),
                     "-o",
                     str(binary),

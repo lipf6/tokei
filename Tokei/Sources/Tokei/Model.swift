@@ -6,13 +6,13 @@ enum RangeKey: String, CaseIterable, Identifiable {
     static let displayCases: [RangeKey] = [.today, .yesterday, .week, .lastWeek, .month, .year]
     var label: String {
         switch self {
-        case .today: return "今日"
-        case .yesterday: return "昨日"
-        case .week: return "本周"
-        case .lastWeek: return "上周"
-        case .month: return "本月"
-        case .year: return "本年"
-        case .all: return "全部"
+        case .today: return L("今日")
+        case .yesterday: return L("昨日")
+        case .week: return L("本周")
+        case .lastWeek: return L("上周")
+        case .month: return L("本月")
+        case .year: return L("本年")
+        case .all: return L("全部")
         }
     }
 }
@@ -26,6 +26,7 @@ struct ClaudeModelStat: Codable, Identifiable {
     var cost: Double
     var pin: Double      // 输入单价 $/M
     var pout: Double     // 输出单价 $/M
+    var pcr: Double?     // 缓存读单价 $/M；老数据没有
     var id: String { name }
     var total: Int { `in` + out + cr + cw }
 }
@@ -150,6 +151,8 @@ struct CodexRanges: Codable {
 
 struct CodexStat: Codable {
     var ranges: CodexRanges
+    var reserveRanges: CodexRanges?
+    var reserveQuota: CodexReserveQuota?
     var p5: Double?
     var pw: Double?
     var r5: Int?
@@ -159,12 +162,35 @@ struct CodexStat: Codable {
     var pw_stale: Bool?
     var plan: String?
     var reset_cards: CodexResetCards?
+
+    enum CodingKeys: String, CodingKey {
+        case ranges
+        case reserveRanges = "reserve_ranges"
+        case reserveQuota = "reserve_quota"
+        case p5, pw, r5, rw, q_updated, p5_stale, pw_stale, plan, reset_cards
+    }
 }
 
 struct CodexResetCards: Codable {
     var count: Int
     var expires: [Int]
     var updated: Int?
+}
+
+struct CodexReserveQuota: Codable {
+    var usedPercent: Double?
+    var resetsAt: Int?
+    var windowMinutes: Int?
+    var plan: String?
+    var updated: Int?
+    var stale: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case usedPercent = "used_percent"
+        case resetsAt = "resets_at"
+        case windowMinutes = "window_minutes"
+        case plan, updated, stale
+    }
 }
 
 struct GeminiModelStat: Codable, Identifiable {
@@ -176,6 +202,7 @@ struct GeminiModelStat: Codable, Identifiable {
     var cost: Double
     var pin: Double      // 输入单价 $/M
     var pout: Double     // 输出单价 $/M
+    var pcr: Double?     // 缓存读单价 $/M；老数据没有
     var id: String { name }
 }
 
@@ -324,6 +351,8 @@ struct GrokStat: Codable {
     var source: String?
     var q_updated: Int?
     var stale: Bool?
+    /// 实时开关开着，但 Grok 登录已过期：没有发请求，显示的是本地日志里的额度。
+    var auth_expired: Bool?
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -337,6 +366,7 @@ struct GrokStat: Codable {
         source = try c.decodeIfPresent(String.self, forKey: .source)
         q_updated = try c.decodeIfPresent(Int.self, forKey: .q_updated)
         stale = try c.decodeIfPresent(Bool.self, forKey: .stale)
+        auth_expired = try c.decodeIfPresent(Bool.self, forKey: .auth_expired)
     }
 }
 
@@ -546,9 +576,14 @@ struct TokenModelStat: Codable, Identifiable {
     var cr: Int = 0
     var cw: Int = 0
     var reason: Int = 0
+    var cost_cny: Double? = nil
     var cost: Double
+    var credits: Double = 0
     var pin: Double = 0
     var pout: Double = 0
+    var pcr: Double = 0
+    /// 这个模型没有公开价、按别的模型估算成本时，参照的那个模型名。
+    var pref: String? = nil
     var id: String { modelId ?? name }
 
     init(from decoder: Decoder) throws {
@@ -562,13 +597,18 @@ struct TokenModelStat: Codable, Identifiable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        credits = try c.decodeIfPresent(Double.self, forKey: .credits) ?? 0
+        cost_cny = try c.decodeIfPresent(Double.self, forKey: .cost_cny)
         pin = try c.decodeIfPresent(Double.self, forKey: .pin) ?? 0
         pout = try c.decodeIfPresent(Double.self, forKey: .pout) ?? 0
+        pcr = try c.decodeIfPresent(Double.self, forKey: .pcr) ?? 0
+        pref = try c.decodeIfPresent(String.self, forKey: .pref)
     }
 
     private enum CodingKeys: String, CodingKey {
         case modelId = "model_id"
-        case name, tokens, `in`, out, cr, cw, reason, cost, pin, pout
+        case name, tokens, `in`, out, cr, cw, reason, cost, cost_cny, pin, pout, pcr, pref
+        case credits
     }
 }
 struct HermesRanges: Codable {
@@ -602,6 +642,7 @@ struct OpenClawRange: Codable {
     var out: Int
     var cr: Int
     var cw: Int
+    var reason: Int = 0
     var cost: Double
     var sessions: Int
     var models: [TokenModelStat]
@@ -616,6 +657,7 @@ struct OpenClawRange: Codable {
         out = try c.decodeIfPresent(Int.self, forKey: .out) ?? 0
         cr = try c.decodeIfPresent(Int.self, forKey: .cr) ?? 0
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
+        reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
@@ -651,7 +693,9 @@ struct TokenUsageRange: Codable {
     var cr: Int
     var cw: Int
     var reason: Int
+    var cost_cny: Double? = nil
     var cost: Double
+    var credits: Double
     var requests: Int
     var sessions: Int = 0
     var models: [TokenModelStat] = []
@@ -667,7 +711,7 @@ struct TokenUsageRange: Codable {
 
     init(tokens: Int = 0, hit: Double = 0, `in` input: Int = 0, out: Int = 0,
          cr: Int = 0, cw: Int = 0, reason: Int = 0, cost: Double = 0,
-         requests: Int = 0, sessions: Int = 0, models: [TokenModelStat] = [],
+         credits: Double = 0, requests: Int = 0, sessions: Int = 0, models: [TokenModelStat] = [],
          coverage: String? = nil) {
         self.tokens = tokens
         self.hit = hit
@@ -677,6 +721,7 @@ struct TokenUsageRange: Codable {
         self.cw = cw
         self.reason = reason
         self.cost = cost
+        self.credits = credits
         self.requests = requests
         self.sessions = sessions
         self.models = models
@@ -693,6 +738,8 @@ struct TokenUsageRange: Codable {
         cw = try c.decodeIfPresent(Int.self, forKey: .cw) ?? 0
         reason = try c.decodeIfPresent(Int.self, forKey: .reason) ?? 0
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
+        credits = try c.decodeIfPresent(Double.self, forKey: .credits) ?? 0
+        cost_cny = try c.decodeIfPresent(Double.self, forKey: .cost_cny)
         requests = try c.decodeIfPresent(Int.self, forKey: .requests) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
@@ -751,7 +798,10 @@ struct KimiExtraUsage: Codable {
     var currency: String
 }
 
-/// Kimi Code 用量 + 官方额度（额度字段全部可选，兼容只报本地用量的旧输出）。
+/// Kimi Code 既有本地 token 统计,也有官方额度。weekly/limits/extra_usage 来自
+/// fork 的 OAuth 自动续期采集；p5/pw/plan 是同一 payload 按上游口径（5h 滚动窗口 +
+/// 订阅周期）的投影。订阅窗口的周期长度接口没有给,因此只透传它返回的重置时刻,
+/// 不替它命名周期。额度字段全部可选，兼容只报本地用量的旧输出。
 struct KimiStat: Codable {
     var ranges: TokenUsageRanges
     var weekly: KimiQuotaRow?
@@ -761,6 +811,18 @@ struct KimiStat: Codable {
     var q_source: String?
     var q_stale: Bool?
     var q_error: String?
+    var p5: Double?
+    var pw: Double?
+    var r5: Int?
+    var rw: Int?
+    var p5_stale: Bool?
+    var pw_stale: Bool?
+    var plan: String?
+
+    var hasQuota: Bool {
+        p5 != nil || pw != nil || weekly != nil || !limits.isEmpty || extra_usage != nil
+    }
+    var hasStaleQuota: Bool { p5_stale == true || pw_stale == true || q_stale == true }
 
     init(ranges: TokenUsageRanges) {
         self.ranges = ranges
@@ -771,6 +833,13 @@ struct KimiStat: Codable {
         q_source = nil
         q_stale = nil
         q_error = nil
+        p5 = nil
+        pw = nil
+        r5 = nil
+        rw = nil
+        p5_stale = nil
+        pw_stale = nil
+        plan = nil
     }
 
     init(from decoder: Decoder) throws {
@@ -783,6 +852,13 @@ struct KimiStat: Codable {
         q_source = try c.decodeIfPresent(String.self, forKey: .q_source)
         q_stale = try c.decodeIfPresent(Bool.self, forKey: .q_stale)
         q_error = try c.decodeIfPresent(String.self, forKey: .q_error)
+        p5 = try c.decodeIfPresent(Double.self, forKey: .p5)
+        pw = try c.decodeIfPresent(Double.self, forKey: .pw)
+        r5 = try c.decodeIfPresent(Int.self, forKey: .r5)
+        rw = try c.decodeIfPresent(Int.self, forKey: .rw)
+        p5_stale = try c.decodeIfPresent(Bool.self, forKey: .p5_stale)
+        pw_stale = try c.decodeIfPresent(Bool.self, forKey: .pw_stale)
+        plan = try c.decodeIfPresent(String.self, forKey: .plan)
     }
 
     /// 从磁盘快照读回的额度不再是实时数据：来源改记为缓存，
@@ -800,6 +876,10 @@ struct KimiStat: Codable {
         if let reset = weekly?.reset_at, reset <= epoch { expired = true }
         if limits.contains(where: { ($0.reset_at ?? .max) <= epoch }) { expired = true }
         q_stale = (q_stale == true) || expired
+        if expired {
+            if p5 != nil { p5_stale = true }
+            if pw != nil { pw_stale = true }
+        }
     }
 }
 
@@ -967,6 +1047,33 @@ struct GrokBotStat: Codable {
     }
 }
 
+/// Devin 的两个来源互不相干：`ranges` 来自 CLI 自己的会话库，
+/// `quota` 来自桌面端启动时写下的那一行套餐缓存。
+struct DevinStat: Codable {
+    var ranges: TokenUsageRanges
+    var quota: ProviderQuotaStat
+
+    static var empty: DevinStat {
+        DevinStat(ranges: .empty, quota: ProviderQuotaStat())
+    }
+
+    init(ranges: TokenUsageRanges, quota: ProviderQuotaStat) {
+        self.ranges = ranges
+        self.quota = quota
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ranges = (try? c.decodeIfPresent(TokenUsageRanges.self, forKey: .ranges)) ?? .empty
+        quota = (try? c.decodeIfPresent(ProviderQuotaStat.self, forKey: .quota))
+            ?? ProviderQuotaStat()
+    }
+}
+
+/// MiniMax Code 同样是两个互不相干的来源：`ranges` 来自桌面端的本地运行时库，
+/// `quota` 来自用户自愿填写 Token Plan Key 后的联网查询，形状与 Devin 相同。
+typealias MiniMaxStat = DevinStat
+
 struct Usage: Codable {
     var claude: ClaudeStat
     var codex: CodexStat
@@ -976,6 +1083,8 @@ struct Usage: Codable {
     var qoderwork: QoderStat
     var qoder: QoderIdeStat
     var qodercli: QoderStat
+    /// Qoder 国内版（~/.qoder-cn），与 Qoder CLI 同格式、单独统计。
+    var qodercliCN: QoderStat
     var hermes: HermesStat
     var zcode: TokenUsageStat
     var mimocode: TokenUsageStat
@@ -984,11 +1093,16 @@ struct Usage: Codable {
     var prime_agent: TokenUsageStat
     var workbuddy: TokenUsageStat
     var workbuddyAI: TokenUsageStat
+    var codebuddy: TokenUsageStat
     var deepseekHarness: TokenUsageStat
     var opencode: TokenUsageStat
     var qwencode: TokenUsageStat
     var qwenwork: QwenWorkQuota
     var kimicode: KimiStat
+    var musecode: TokenUsageStat
+    var cmdcode: TokenUsageStat
+    var devin: DevinStat
+    var minimax: MiniMaxStat
     var antigravity: ProviderQuotaStat
     var cursor: ProviderQuotaStat
     var zed: ProviderQuotaStat
@@ -997,10 +1111,11 @@ struct Usage: Codable {
 
     enum CodingKeys: String, CodingKey {
         case claude, codex, gemini, grok, grokBot = "grok_bot"
-        case qoder, qoderwork, qodercli, hermes, zcode, mimocode
+        case qoder, qoderwork, qodercli, qodercliCN = "qodercli_cn", hermes, zcode, mimocode
         case openclaw, pi, workbuddy, workbuddyAI = "workbuddy_ai"
+        case codebuddy
         case deepseekHarness = "deepseek_harness", opencode, qwencode
-        case qwenwork, kimicode, prime_agent, antigravity, cursor, zed, sub2api, zai
+        case qwenwork, kimicode, musecode, cmdcode, prime_agent, devin, minimax, antigravity, cursor, zed, sub2api, zai
     }
 
     init(from decoder: Decoder) throws {
@@ -1016,6 +1131,8 @@ struct Usage: Codable {
             ?? QoderIdeStat(ranges: .empty, model: nil)
         qodercli = (try? c.decodeIfPresent(QoderStat.self, forKey: .qodercli))
             ?? QoderStat(ranges: .empty, model: nil)
+        qodercliCN = (try? c.decodeIfPresent(QoderStat.self, forKey: .qodercliCN))
+            ?? QoderStat(ranges: .empty, model: nil)
         hermes = try c.decode(HermesStat.self, forKey: .hermes)
         zcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .zcode) ?? TokenUsageStat(ranges: .empty)
         mimocode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .mimocode) ?? TokenUsageStat(ranges: .empty)
@@ -1024,11 +1141,16 @@ struct Usage: Codable {
         prime_agent = try c.decodeIfPresent(TokenUsageStat.self, forKey: .prime_agent) ?? TokenUsageStat(ranges: .empty)
         workbuddy = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddy) ?? TokenUsageStat(ranges: .empty)
         workbuddyAI = try c.decodeIfPresent(TokenUsageStat.self, forKey: .workbuddyAI) ?? TokenUsageStat(ranges: .empty)
+        codebuddy = try c.decodeIfPresent(TokenUsageStat.self, forKey: .codebuddy) ?? TokenUsageStat(ranges: .empty)
         deepseekHarness = try c.decodeIfPresent(TokenUsageStat.self, forKey: .deepseekHarness) ?? TokenUsageStat(ranges: .empty)
         opencode = try c.decode(TokenUsageStat.self, forKey: .opencode)
         qwencode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .qwencode) ?? TokenUsageStat(ranges: .empty)
         qwenwork = (try? c.decodeIfPresent(QwenWorkQuota.self, forKey: .qwenwork)) ?? QwenWorkQuota()
         kimicode = try c.decodeIfPresent(KimiStat.self, forKey: .kimicode) ?? KimiStat(ranges: .empty)
+        musecode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .musecode) ?? TokenUsageStat(ranges: .empty)
+        cmdcode = try c.decodeIfPresent(TokenUsageStat.self, forKey: .cmdcode) ?? TokenUsageStat(ranges: .empty)
+        devin = (try? c.decodeIfPresent(DevinStat.self, forKey: .devin)) ?? .empty
+        minimax = (try? c.decodeIfPresent(MiniMaxStat.self, forKey: .minimax)) ?? .empty
         antigravity = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .antigravity) ?? ProviderQuotaStat()
         cursor = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .cursor) ?? ProviderQuotaStat()
         zed = try c.decodeIfPresent(ProviderQuotaStat.self, forKey: .zed) ?? ProviderQuotaStat()
@@ -1049,7 +1171,12 @@ enum Fmt {
 
     static func human(_ n: Int) -> String {
         let v = Double(n)
-        if v >= 100_000_000 { return String(format: "%.1f亿", v / 100_000_000) }
+        // 中文按「亿」进位；其他语言用国际通行的 B（十亿）。
+        if L10n.isChinese {
+            if v >= 100_000_000 { return String(format: "%.1f亿", v / 100_000_000) } // l10n-ignore
+        } else if v >= 1_000_000_000 {
+            return String(format: "%.1fB", v / 1_000_000_000)
+        }
         if v >= 1_000_000 { return String(format: "%.1fM", v / 1_000_000) }
         if v >= 1_000 { return String(format: "%.0fK", v / 1_000) }
         return String(format: "%.0f", v)
@@ -1110,7 +1237,7 @@ enum Fmt {
     static func countdown(_ epoch: Int?) -> String {
         guard let e = epoch else { return "?" }
         let s = TimeInterval(e) - Date().timeIntervalSince1970
-        if s <= 0 { return "即将重置" }
+        if s <= 0 { return L("即将重置") }
         let h = Int(s) / 3600, m = (Int(s) % 3600) / 60
         return h > 0 ? "\(h)h\(m)m" : "\(m)m"
     }
@@ -1124,14 +1251,36 @@ enum Fmt {
 
     static func price(_ x: Double) -> String { String(format: "%g", x) }
 
+    /// 周一到周日的短标签。中文沿用「一…日」，其他语言用系统自带的缩写（Mon / lun. / 月 / 월）。
+    static var weekdayLabels: [String] {
+        if L10n.isChinese { return ["一", "二", "三", "四", "五", "六", "日"] } // l10n-ignore
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: AppLanguage.current.rawValue)
+        let sundayFirst = formatter.shortStandaloneWeekdaySymbols ?? []
+        guard sundayFirst.count == 7 else { return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] }
+        return Array(sundayFirst[1...]) + [sundayFirst[0]]
+    }
+
     static func relativeDate(_ iso: String) -> String {
         guard let d = isoDayFormatter.date(from: iso) else { return iso }
         let days = Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: d),
                                                     to: Calendar.current.startOfDay(for: Date())).day ?? 0
-        if days == 0 { return "今天" }
-        if days == 1 { return "昨天" }
-        if days <= 7 { return "\(days)天前" }
-        if days <= 30 { return "\(days / 7)周前" }
-        return "\(days / 30)月前"
+        if days == 0 { return L("今天") }
+        if days == 1 { return L("昨天") }
+        if days <= 7 { return L("%@天前", days) }
+        if days <= 30 { return L("%@周前", days / 7) }
+        return L("%@月前", days / 30)
     }
+}
+
+/// Cost fields retain native currencies; no exchange-rate conversion or mixed sum.
+func nativeMoney(_ usd: Double, _ cny: Double? = nil) -> String {
+    // 不到 1 分的写「<$0.01」：$0.00 看着像没算钱，其实是算了、只是很少
+    func amount(_ symbol: String, _ value: Double) -> String {
+        value > 0 && value < 0.005 ? "<\(symbol)0.01" : String(format: "\(symbol)%.2f", value)
+    }
+    var parts: [String] = []
+    if usd > 0 || (cny ?? 0) <= 0 { parts.append(amount("$", usd)) }
+    if let cny, cny > 0 { parts.append(amount("¥", cny)) }
+    return parts.joined(separator: " + ")
 }

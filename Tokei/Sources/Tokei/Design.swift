@@ -29,6 +29,10 @@ extension View {
 
 // 设计系统:颜色 / 间距 / 圆角集中定义,组件语义化复用。
 enum Theme {
+    static func fontSize(_ points: CGFloat) -> CGFloat {
+        PanelFontSize.scaled(points)
+    }
+
     static let claude = Color(red: 217.0 / 255, green: 119.0 / 255, blue: 87.0 / 255) // Claude 珊瑚橙 #D97757
     static let codex = Color(red: 0.42, green: 0.68, blue: 0.98) // 原作者天青
     static let gemini = Color(red: 0.62, green: 0.52, blue: 0.92)   // 薰衣草
@@ -41,6 +45,7 @@ enum Theme {
     static let qoder  = Color(red: 0.90, green: 0.75, blue: 0.35)   // 琥珀金
     static let qoderwork = Color(red: 0.75, green: 0.65, blue: 0.30)  // 暗琥珀
     static let qodercli = Color(red: 0.96, green: 0.84, blue: 0.45)  // 亮琥珀
+    static let qodercliCN = Color(red: 0.98, green: 0.62, blue: 0.35) // 橙珊瑚（国内版）
     static let hermes = Color(red: 0.40, green: 0.82, blue: 0.60)   // 翠绿
     static let zcode = Color(red: 0.52, green: 0.80, blue: 0.34)    // 青柠绿
     static let mimocode = Color(red: 0.95, green: 0.50, blue: 0.26) // 暖橙
@@ -49,11 +54,16 @@ enum Theme {
     static let primeAgent = Color(red: 0.96, green: 0.58, blue: 0.28) // 活力橙
     static let workbuddy = Color(red: 0.25, green: 0.78, blue: 0.72) // 青绿
     static let workbuddyAI = Color(red: 0.36, green: 0.66, blue: 0.94) // 国际版蓝
+    static let codebuddy = Color(red: 0.46, green: 0.58, blue: 0.96) // CodeBuddy 蓝紫
     static let deepseekHarness = Color(red: 0.18, green: 0.58, blue: 0.94) // 深海蓝
     static let opencode = Color(red: 0.55, green: 0.75, blue: 0.90) // 天蓝灰
     static let qwencode = Color(red: 0.48, green: 0.55, blue: 0.95) // 靛蓝
     static let qwenwork = Color(red: 0.24, green: 0.72, blue: 0.68) // 千问青
     static let kimicode = Color(red: 168.0 / 255, green: 85.0 / 255, blue: 247.0 / 255) // Kimi 紫 #A855F7
+    static let musecode = Color(red: 0.10, green: 0.42, blue: 0.92) // Meta 蓝
+    static let cmdcode = Color(red: 0.22, green: 0.68, blue: 0.32) // 终端绿
+    static let devin = Color(red: 0.42, green: 0.47, blue: 0.98)    // 深蓝紫
+    static let minimax = Color(red: 0.91, green: 0.25, blue: 0.40)  // MiniMax 玫红
 
     static let panelWidth: CGFloat = 322
     static let cardRadius: CGFloat = 16
@@ -202,18 +212,19 @@ struct MiniBar: View {
 struct StatBar: View {
     var name: String
     var tokens: Int
+    var cost_cny: Double? = nil
     var cost: Double
     var maxTokens: Double
     var tint: Color
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
-                Text(name).font(.system(size: 11, weight: .medium))
+                Text(name).font(.system(size: Theme.fontSize(11), weight: .medium))
                     .foregroundStyle(Theme.tPrimary).lineLimit(1)
                 Spacer(minLength: 8)
-                Text(Fmt.human(tokens)).font(.system(size: 9.5, design: .monospaced))
+                Text(Fmt.human(tokens)).font(.system(size: Theme.fontSize(9.5), design: .monospaced))
                     .foregroundStyle(Theme.tTertiary)
-                Text("$\(Int(cost))").font(.system(size: 10, weight: .semibold, design: .monospaced))
+                Text(nativeMoney(cost, cost_cny)).font(.system(size: Theme.fontSize(10), weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.tSecondary)
             }
             GeometryReader { geo in
@@ -236,16 +247,16 @@ struct MetricCell: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 9.5, weight: .bold))
+                .font(.system(size: Theme.fontSize(9.5), weight: .bold))
                 .foregroundStyle(tint)
                 .frame(width: 21, height: 21)
                 .background(Circle().fill(tint.opacity(0.10)))
             VStack(alignment: .leading, spacing: 1) {
                 Text(label)
-                    .font(.system(size: 9.5))
+                    .font(.system(size: Theme.fontSize(9.5)))
                     .foregroundStyle(Theme.tTertiary)
                 Text(value)
-                    .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(12.5), weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.tPrimary)
             }
             Spacer(minLength: 0)
@@ -269,10 +280,10 @@ struct RingMetricCell: View {
             .frame(width: 21, height: 21)
             VStack(alignment: .leading, spacing: 1) {
                 Text(label)
-                    .font(.system(size: 9.5))
+                    .font(.system(size: Theme.fontSize(9.5)))
                     .foregroundStyle(Theme.tTertiary)
                 Text("\(Int(value.rounded()))%")
-                    .font(.system(size: 12.5, weight: .semibold, design: .monospaced))
+                    .font(.system(size: Theme.fontSize(12.5), weight: .semibold, design: .monospaced))
                     .foregroundStyle(Theme.tPrimary)
             }
             Spacer(minLength: 0)
@@ -289,11 +300,11 @@ struct CostHeadline: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 7) {
             Text(value)
-                .font(.system(size: 23, weight: .bold, design: .rounded))
+                .font(.system(size: Theme.fontSize(23), weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .contentTransition(.numericText())
             Text(caption)
-                .font(.system(size: 10))
+                .font(.system(size: Theme.fontSize(10)))
                 .foregroundStyle(Theme.tTertiary)
             Spacer(minLength: 0)
         }
@@ -317,7 +328,7 @@ struct SegmentedTabs: View {
             ForEach(RangeKey.displayCases) { k in
                 let on = k == highlighted
                 Text(k.label)
-                    .font(.system(size: 12, weight: on ? .semibold : .regular))
+                    .font(.system(size: Theme.fontSize(12), weight: on ? .semibold : .regular))
                     .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 5)
@@ -335,10 +346,20 @@ struct SegmentedTabs: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         guard sel != k else { return }
-                        sel = k
+                        // 高亮块照常做弹簧动画，但页面切换本身必须留在动画之外。
+                        //
+                        // 两者写在同一个闭包里时，SwiftUI 会把它们并进同一个事务，
+                        // 于是整块面板的布局跟着弹簧一起动。面板是挂在菜单栏按钮上的
+                        // NSPopover，开着的时候做动画式布局会让 AppKit 重新挑选屏幕和
+                        // 锚点——在全屏 Space 与外接显示器下会把面板甩到屏幕边上。
+                        // main.swift 里的 sizingOptions = [] 与 animates = false 堵的是
+                        // 同一件事的另外两个入口，这里是第三个。
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                             highlighted = k
                         }
+                        var pageChange = Transaction()
+                        pageChange.disablesAnimations = true
+                        withTransaction(pageChange) { sel = k }
                     }
             }
         }
@@ -363,8 +384,8 @@ struct IconButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 10, weight: .semibold))
-                Text(label).font(.system(size: 11, weight: .medium))
+                Image(systemName: icon).font(.system(size: Theme.fontSize(10), weight: .semibold))
+                Text(label).font(.system(size: Theme.fontSize(11), weight: .medium))
             }
             .foregroundStyle(hover ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
             .padding(.horizontal, 9)

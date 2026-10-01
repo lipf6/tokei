@@ -16,6 +16,7 @@ class ProviderQuotaModelTests(unittest.TestCase):
                     "swiftc",
                     "-parse-as-library",
                     str(ROOT / "Tokei/Sources/Tokei/Model.swift"),
+                    str(ROOT / "Tokei/Sources/Tokei/L10n.swift"),
                     str(ROOT / "tests/swift/ProviderQuotaModelCheck.swift"),
                     "-o",
                     str(binary),
@@ -39,12 +40,22 @@ class ProviderQuotaModelTests(unittest.TestCase):
         self.assertNotIn("antigravity.available", gemini_card)
         self.assertNotIn("displayRange", source)
 
+    def test_cursor_card_requires_selected_range_usage(self):
+        source = (ROOT / "Tokei/Sources/Tokei/PanelView.swift").read_text()
+        start = source.index('ToolCardItem(id: "cursor"')
+        end = source.index('ToolCardItem(id: "zed"', start)
+        cursor_card = source[start:end]
+
+        self.assertIn("active: cursorUsage.totalTokens > 0 || cursorUsage.requests > 0", cursor_card)
+        self.assertNotIn("u.cursor.available", cursor_card)
+
     def test_sync_manager_provider_config_typechecks(self):
         result = subprocess.run(
             [
                 "swiftc",
                 "-typecheck",
                 str(ROOT / "Tokei/Sources/Tokei/Model.swift"),
+                str(ROOT / "Tokei/Sources/Tokei/L10n.swift"),
                 str(ROOT / "Tokei/Sources/Tokei/SyncManager.swift"),
                 str(ROOT / "tests/swift/SyncManagerProviderConfigTypes.swift"),
             ],

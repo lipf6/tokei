@@ -12,11 +12,25 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 @main
 struct UsageSummaryBuilderCheck {
     static func main() throws {
+        // 断言的是中文输出，不能随跑测试那台机器的系统语言变化。
+        L10n.forcedLanguage = .zh
         // ImageRenderer needs an AppKit app instance (same as --shot).
         _ = NSApplication.shared
 
         let usage = try decodeFixture(Self.fixtureJSON)
         let allVisible = UsageToolVisibility.allVisible
+        let staleReserveQuota = try JSONDecoder().decode(
+            CodexReserveQuota.self,
+            from: Data(#"{"used_percent":42,"stale":true}"#.utf8)
+        )
+        try expect(staleReserveQuota.usedPercent == 42 && staleReserveQuota.stale == true,
+                   "reserve stale flag must decode")
+        let legacyReserveQuota = try JSONDecoder().decode(
+            CodexReserveQuota.self,
+            from: Data(#"{"used_percent":42}"#.utf8)
+        )
+        try expect(legacyReserveQuota.stale == nil,
+                   "reserve quota without stale must remain decoder-compatible")
 
         let todayText = UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: allVisible, updated: "12:34"
@@ -26,14 +40,35 @@ struct UsageSummaryBuilderCheck {
         try expect(todayText.contains("$1.25"), "claude cost missing: \(todayText)")
         try expect(todayText.contains("Codex"), "codex line missing: \(todayText)")
         try expect(todayText.contains("$0.50"), "codex cost missing: \(todayText)")
+        try expect(todayText.contains("Luna Reserve"), "reserve line missing: \(todayText)")
+        try expect(todayText.contains("$0.25"), "reserve cost missing: \(todayText)")
         try expect(todayText.contains("合计"), "total line missing: \(todayText)")
-        // Claude 1.25 + Codex 0.50 + Gemini 0.10
-        try expect(todayText.contains("$1.85"), "total cost wrong: \(todayText)")
+        // Claude 1.25 + Codex 0.50 + Luna Reserve 0.25 + Gemini 0.10
+        try expect(todayText.contains("$2.10"), "total cost wrong: \(todayText)")
         try expect(todayText.contains("更新于 12:34"), "updated missing: \(todayText)")
         try expect(!todayText.contains("更新于 更新"), "must not double-prefix bare time: \(todayText)")
         try expect(todayText.contains("Gemini"), "gemini should appear when visible: \(todayText)")
         try expect(todayText.contains("$0.10") || todayText.contains("$0.1"),
                    "gemini cost missing: \(todayText)")
+        try expect(todayText.contains("CodeBuddy"), "codebuddy line missing: \(todayText)")
+        try expect(todayText.contains("2.75 Credits"), "codebuddy credits missing: \(todayText)")
+
+        var mixed = usage
+        mixed.deepseekHarness.ranges.today.cost = 0.31
+        mixed.deepseekHarness.ranges.today.cost_cny = 5.02
+        mixed.deepseekHarness.ranges.today.in = 100
+        let nativeText = UsageSummaryBuilder.text(usage: mixed, range: .today,
+                                                 visibility: allVisible)
+        try expect(nativeText.contains("¥5.02"), "native CNY missing: \(nativeText)")
+        try expect(nativeMoney(0.31, 5.02) == "$0.31 + ¥5.02", "currencies must stay separate")
+        try expect(nativeMoney(0.0017) == "<$0.01", "a sub-cent cost must not read as $0.00")
+        try expect(nativeMoney(0) == "$0.00", "zero stays zero")
+        let nativeTotals = UsageSummaryBuilder.totals(for: UsageSummaryBuilder.toolLines(
+            usage: mixed, range: .today, visibility: allVisible))
+        try expect(nativeTotals.cost_cny == 5.02, "CNY total mismatch")
+        let decoded = try JSONDecoder().decode(TokenUsageRange.self, from:
+            Data(#"{"cost":0.31,"cost_cny":5.02}"#.utf8))
+        try expect(decoded.cost == 0.31 && decoded.cost_cny == 5.02, "currency decoding mismatch")
 
         // Store path uses lastUpdated = "更新 HH:mm:ss" (main.swift); strip, don't nest.
         let storeStampText = UsageSummaryBuilder.text(
@@ -50,8 +85,34 @@ struct UsageSummaryBuilderCheck {
         try expect(UsageSummaryBuilder.formatUpdatedLine("加载中…") == nil,
                    "loading stamp omitted")
 
+        // Devin 卡片的复制按钮按 toolID "devin" 取这一行。
+        let devinLine = UsageSummaryBuilder.line(
+            forToolID: "devin", usage: usage, range: .today, visibility: allVisible
+        )
+        try expect(devinLine != nil, "devin line must resolve by toolID")
+        try expect(devinLine?.name == "Devin", "devin line name")
+        try expect(devinLine?.tokens == 59200, "devin line tokens")
+        try expect(devinLine?.sessions == 1, "devin line sessions")
+        try expect(todayText.contains("Devin"), "devin line missing: \(todayText)")
+
+        // MiniMax Code 同理，按 toolID "minimax" 取；额度不进复制文本。
+        let miniMaxLine = UsageSummaryBuilder.line(
+            forToolID: "minimax", usage: usage, range: .today, visibility: allVisible
+        )
+        try expect(miniMaxLine?.name == "MiniMax Code", "minimax line name")
+        try expect(miniMaxLine?.tokens == 145303, "minimax line tokens")
+        try expect(miniMaxLine?.sessions == 5, "minimax line sessions")
+        try expect(usage.minimax.quota.available, "minimax quota decodes alongside ranges")
+
+        var hideDevin = allVisible
+        hideDevin.devin = false
+        try expect(!UsageSummaryBuilder.text(
+            usage: usage, range: .today, visibility: hideDevin, updated: nil
+        ).contains("Devin"), "hidden devin must be omitted")
+
         var hideGemini = allVisible
         hideGemini.gemini = false
+        hideGemini.codebuddy = false
         let hiddenText = UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: hideGemini, updated: nil
         )
@@ -59,8 +120,9 @@ struct UsageSummaryBuilderCheck {
                    "hidden gemini must be omitted: \(hiddenText)")
         try expect(hiddenText.contains("Claude Code"), "claude still required: \(hiddenText)")
         try expect(hiddenText.contains("Codex"), "codex still required: \(hiddenText)")
-        try expect(hiddenText.contains("$1.75"),
-                   "total without gemini should be $1.75: \(hiddenText)")
+        try expect(hiddenText.contains("Luna Reserve"), "reserve still required: \(hiddenText)")
+        try expect(hiddenText.contains("$2.00"),
+                   "total without gemini should be $2.00: \(hiddenText)")
 
         // Empty tools (OpenCode with zeros) must not dump noise.
         try expect(!todayText.contains("OpenCode"),
@@ -76,9 +138,11 @@ struct UsageSummaryBuilderCheck {
         let lines = UsageSummaryBuilder.toolLines(
             usage: usage, range: .today, visibility: hideGemini
         )
-        try expect(lines.map(\.name) == ["Claude Code", "Codex"],
+        try expect(lines.map(\.name) == ["Claude Code", "Codex", "Luna Reserve", "Devin",
+                                          "MiniMax Code"],
                    "tool order/names: \(lines.map(\.name))")
-        try expect(lines.map(\.id) == ["claude", "codex"], "tool ids: \(lines.map(\.id))")
+        try expect(lines.map(\.id) == ["claude", "codex", "codex_reserve", "devin", "minimax"],
+                   "tool ids: \(lines.map(\.id))")
         try expect(lines[0].cost == 1.25, "claude cost value")
         try expect(lines[0].tokens == 1350, "claude tokens 1000+200+100+50")
         try expect(lines[0].input == 1000, "claude input detail")
@@ -86,12 +150,22 @@ struct UsageSummaryBuilderCheck {
         try expect(lines[0].cacheRead == 100, "claude cache read")
         try expect(lines[1].cost == 0.50, "codex cost value")
         try expect(lines[1].tokens == 350, "codex tokens 100+50+200")
+        try expect(lines[2].cost == 0.25, "reserve cost value")
+        try expect(lines[2].tokens == 70, "reserve tokens 40+10+20")
+
+        try expect(usage.openclaw.ranges.today.reason == 0,
+                   "older OpenClaw snapshots without reason must decode as zero")
+        let openClawYear = UsageSummaryBuilder.toolLines(
+            usage: usage, range: .year, visibility: allVisible
+        ).first(where: { $0.id == "openclaw" })
+        try expect(openClawYear?.tokens == 7 && openClawYear?.reason == 7,
+                   "OpenClaw reasoning tokens must survive decode and summary aggregation")
 
         let totals = UsageSummaryBuilder.totals(for: lines)
-        try expect(totals.tools == 2, "totals tools")
-        try expect(abs(totals.cost - 1.75) < 0.001, "totals cost")
-        try expect(totals.input == 1100, "totals input")
-        try expect(totals.output == 400, "totals output")
+        try expect(totals.tools == 5, "totals tools")
+        try expect(abs(totals.cost - 2.00) < 0.001, "totals cost")
+        try expect(totals.input == 1140 + 17370 + 111819, "totals input incl. Devin + MiniMax")
+        try expect(totals.output == 420 + 166 + 4630, "totals output incl. Devin + MiniMax")
         try expect(hiddenText.contains("输入") || UsageSummaryBuilder.text(
             usage: usage, range: .today, visibility: hideGemini
         ).contains("输入"), "text totals include input detail")
@@ -137,6 +211,13 @@ struct UsageSummaryBuilderCheck {
             try expect(hasImage, "pasteboard should contain image/png")
         }
 
+        // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。
+        let gray = NSColor(Theme.tTertiary)
+        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code"] {
+            let tint = NSColor(UsageShareImage.tint(for: name))
+            try expect(!tint.isEqual(gray), "\(name) share tint must not be gray")
+        }
+
         print("usage summary builder checks passed")
     }
 
@@ -167,6 +248,14 @@ struct UsageSummaryBuilderCheck {
       "codex": {
         "ranges": {
           "today": {"hit": 20, "in": 100, "cached": 50, "out": 200, "reason": 10, "cost": 0.5, "sessions": 1, "models": []},
+          "yesterday": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "last_week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "month": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "year": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []}
+        },
+        "reserve_ranges": {
+          "today": {"hit": 20, "in": 40, "cached": 10, "out": 20, "reason": 5, "cost": 0.25, "sessions": 1, "models": []},
           "yesterday": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
           "week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
           "last_week": {"hit": 0, "in": 0, "cached": 0, "out": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
@@ -211,8 +300,40 @@ struct UsageSummaryBuilderCheck {
           "week": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
           "last_week": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
           "month": {"tasks": 0, "completed": 0, "failed": 0, "models": []},
-          "year": {"tasks": 0, "completed": 0, "failed": 0, "models": []}
+          "year": {"tasks": 0, "completed": 0, "failed": 0, "reason": 7, "models": []}
         }
+      },
+      "codebuddy": {
+        "ranges": {
+          "today": {"hit": 40, "in": 60, "out": 20, "cr": 40, "cw": 0, "reason": 0, "credits": 2.75, "sessions": 1, "models": [{"model_id": "fictional-codebuddy-model", "name": "Fictional CodeBuddy Model", "in": 60, "out": 20, "cr": 40, "cw": 0, "reason": 0, "cost": 0, "credits": 2.75}]},
+          "yesterday": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "last_week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "month": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []},
+          "year": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "credits": 0, "sessions": 0, "models": []}
+        }
+      },
+      "devin": {
+        "ranges": {
+          "today": {"hit": 70.5, "in": 17370, "out": 166, "cr": 41664, "cw": 0, "reason": 0, "cost": 0, "sessions": 1, "models": []},
+          "yesterday": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "last_week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "month": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "year": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []}
+        },
+        "quota": {"available": true, "plan": "Devin Free"}
+      },
+      "minimax": {
+        "ranges": {
+          "today": {"hit": 1.2, "in": 111819, "out": 4630, "cr": 1457, "cw": 27397, "reason": 0, "cost": 0, "sessions": 5, "models": []},
+          "yesterday": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "last_week": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "month": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []},
+          "year": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []}
+        },
+        "quota": {"available": true, "plan": "Token Plan"}
       },
       "opencode": {
         "ranges": {

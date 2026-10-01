@@ -10,6 +10,7 @@ struct UsageToolVisibility: Equatable {
     var qoder = true
     var qoderwork = true
     var qodercli = true
+    var qodercliCN = true
     var hermes = true
     var zcode = true
     var mimocode = true
@@ -18,10 +19,15 @@ struct UsageToolVisibility: Equatable {
     var primeAgent = true
     var workbuddy = true
     var workbuddyAI = true
+    var codebuddy = true
     var deepseekHarness = true
     var opencode = true
     var qwencode = true
     var kimicode = true
+    var musecode = true
+    var cmdcode = true
+    var devin = true
+    var minimax = true
 
     static let allVisible = UsageToolVisibility()
 }
@@ -32,6 +38,7 @@ enum UsageSummaryBuilder {
     struct Line: Equatable, Identifiable {
         var id: String
         var name: String
+        var cost_cny: Double? = nil
         var cost: Double?
         /// Primary total tokens shown as headline (same basis as cards when possible).
         var tokens: Int?
@@ -58,6 +65,7 @@ enum UsageSummaryBuilder {
     }
 
     struct Totals: Equatable {
+        var cost_cny: Double = 0
         var cost: Double
         var tokens: Int
         var sessions: Int
@@ -72,6 +80,7 @@ enum UsageSummaryBuilder {
 
     static func totals(for lines: [Line]) -> Totals {
         Totals(
+            cost_cny: lines.compactMap(\.cost_cny).reduce(0, +),
             cost: lines.compactMap(\.cost).reduce(0, +),
             tokens: lines.compactMap(\.tokens).reduce(0, +),
             sessions: lines.compactMap(\.sessions).reduce(0, +),
@@ -93,29 +102,29 @@ enum UsageSummaryBuilder {
         updated: String? = nil
     ) -> String {
         let lines = toolLines(usage: usage, range: range, visibility: visibility)
-        var out: [String] = ["Tokei 用量 · \(range.label)"]
+        var out: [String] = [L("Tokei 用量 · %@", range.label)]
         if lines.isEmpty {
-            out.append("（当前范围无可复制的用量）")
+            out.append(L("（当前范围无可复制的用量）"))
         } else {
             for line in lines {
                 out.append(formatLine(line))
             }
             let t = totals(for: lines)
             var totalParts: [String] = []
-            if t.cost > 0 { totalParts.append(String(format: "$%.2f", t.cost)) }
+            if t.cost > 0 || t.cost_cny > 0 { totalParts.append(nativeMoney(t.cost, t.cost_cny)) }
             if t.tokens > 0 { totalParts.append("\(Fmt.human(t.tokens)) tok") }
-            if t.sessions > 0 { totalParts.append("\(t.sessions) 会话") }
-            if t.tools > 0 { totalParts.append("\(t.tools) 工具") }
+            if t.sessions > 0 { totalParts.append(L("%@ 会话", t.sessions)) }
+            if t.tools > 0 { totalParts.append(L("%@ 工具", t.tools)) }
             if !totalParts.isEmpty {
-                out.append("合计  " + totalParts.joined(separator: " · "))
+                out.append(L("合计  %@", totalParts.joined(separator: " · ")))
             }
             var detail: [String] = []
-            if t.input > 0 { detail.append("输入 \(Fmt.human(t.input))") }
-            if t.output > 0 { detail.append("输出 \(Fmt.human(t.output))") }
-            if t.cacheRead > 0 { detail.append("缓存读 \(Fmt.human(t.cacheRead))") }
-            if t.cacheWrite > 0 { detail.append("缓存写 \(Fmt.human(t.cacheWrite))") }
-            if t.reason > 0 { detail.append("推理 \(Fmt.human(t.reason))") }
-            if t.calls > 0 { detail.append("调用 \(t.calls)") }
+            if t.input > 0 { detail.append(L("输入 %@", Fmt.human(t.input))) }
+            if t.output > 0 { detail.append(L("输出 %@", Fmt.human(t.output))) }
+            if t.cacheRead > 0 { detail.append(L("缓存读 %@", Fmt.human(t.cacheRead))) }
+            if t.cacheWrite > 0 { detail.append(L("缓存写 %@", Fmt.human(t.cacheWrite))) }
+            if t.reason > 0 { detail.append(L("推理 %@", Fmt.human(t.reason))) }
+            if t.calls > 0 { detail.append(L("调用 %@", t.calls)) }
             if !detail.isEmpty {
                 out.append(detail.joined(separator: " · "))
             }
@@ -131,18 +140,20 @@ enum UsageSummaryBuilder {
         guard let updated else { return nil }
         let trimmed = updated.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if trimmed == "加载中…" || trimmed.hasPrefix("加载中")
-            || trimmed == "加载失败" || trimmed == "预览" {
+        // 状态文字是按当前语言写进去的，这里也按当前语言认。
+        if [L("加载失败"), L("预览")].contains(trimmed) || trimmed.hasPrefix(L("加载中")) {
             return nil
         }
         var body = trimmed
-        if body.hasPrefix("更新于") {
-            body = String(body.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-        } else if body.hasPrefix("更新") {
-            body = String(body.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        for template in ["更新于 %@", "更新 %@"] { // l10n-ignore
+            let prefix = L(template, "").trimmingCharacters(in: .whitespaces)
+            if !prefix.isEmpty, body.hasPrefix(prefix) {
+                body = String(body.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)
+                break
+            }
         }
         guard !body.isEmpty else { return nil }
-        return "更新于 \(body)"
+        return L("更新于 %@", body)
     }
 
     static func toolLines(
@@ -166,12 +177,22 @@ enum UsageSummaryBuilder {
             let r = usage.codex.ranges.get(range)
             let line = Line(
                 id: "codex", name: "Codex", cost: r.cost,
-                tokens: r.in + r.cached + r.out, sessions: r.sessions, calls: nil,
+                tokens: r.tokens, sessions: r.sessions, calls: nil,
                 input: r.in, output: r.out, cacheRead: r.cached, cacheWrite: nil,
                 reason: r.reason > 0 ? r.reason : nil,
                 hit: r.hit > 0 ? r.hit : nil, extra: nil
             )
             if !line.isEmpty { lines.append(line) }
+            if let r = usage.codex.reserveRanges?.get(range) {
+                let reserve = Line(
+                    id: "codex_reserve", name: "Luna Reserve", cost: r.cost,
+                    tokens: r.tokens, sessions: r.sessions, calls: nil,
+                    input: r.in, output: r.out, cacheRead: r.cached, cacheWrite: nil,
+                    reason: r.reason > 0 ? r.reason : nil,
+                    hit: r.hit > 0 ? r.hit : nil, extra: nil
+                )
+                if !reserve.isEmpty { lines.append(reserve) }
+            }
         }
         if visibility.gemini {
             let r = usage.gemini.ranges.get(range)
@@ -220,7 +241,7 @@ enum UsageSummaryBuilder {
                 cacheRead: accountUsage.cr > 0 ? accountUsage.cr : nil,
                 cacheWrite: accountUsage.cw > 0 ? accountUsage.cw : nil,
                 reason: nil, hit: nil,
-                extra: r.turns > 0 ? "\(r.turns) 条消息" : nil
+                extra: r.turns > 0 ? L("%@ 条消息", r.turns) : nil
             )
             if !line.isEmpty { lines.append(line) }
         }
@@ -245,15 +266,12 @@ enum UsageSummaryBuilder {
             if !line.isEmpty { lines.append(line) }
         }
         if visibility.qodercli {
-            let r = usage.qodercli.ranges.get(range)
-            let line = Line(
-                id: "qodercli", name: "Qoder CLI", cost: nil,
-                tokens: r.totalTokens, sessions: r.sessions, calls: r.calls,
-                input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
-                reason: nil, hit: r.hit > 0 ? r.hit : nil,
-                extra: r.credits > 0 ? "\(Fmt.credits(r.credits)) Credits" : nil
-            )
-            if !line.isEmpty { lines.append(line) }
+            appendQoderCli(&lines, id: "qodercli", name: "Qoder CLI",
+                           range: usage.qodercli.ranges.get(range))
+        }
+        if visibility.qodercliCN {
+            appendQoderCli(&lines, id: "qodercli_cn", name: "Qoder CN",
+                           range: usage.qodercliCN.ranges.get(range))
         }
         if visibility.hermes {
             let r = usage.hermes.ranges.get(range)
@@ -276,10 +294,11 @@ enum UsageSummaryBuilder {
             let r = usage.openclaw.ranges.get(range)
             let line = Line(
                 id: "openclaw", name: "OpenClaw", cost: r.cost,
-                tokens: r.in + r.out + r.cr + r.cw, sessions: r.sessions,
+                tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions,
                 calls: r.tasks > 0 ? r.tasks : nil,
                 input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
-                reason: nil, hit: r.hit > 0 ? r.hit : nil, extra: nil
+                reason: r.reason > 0 ? r.reason : nil,
+                hit: r.hit > 0 ? r.hit : nil, extra: nil
             )
             if !line.isEmpty { lines.append(line) }
         }
@@ -297,6 +316,11 @@ enum UsageSummaryBuilder {
             appendTokenTool(&lines, id: "workbuddy-ai", name: "WorkBuddy Intl.",
                             range: usage.workbuddyAI.ranges.get(range))
         }
+        if visibility.codebuddy {
+            appendTokenTool(&lines, id: "codebuddy", name: "CodeBuddy",
+                            range: usage.codebuddy.ranges.get(range),
+                            includesCost: false, includesCredits: true)
+        }
         if visibility.deepseekHarness {
             appendTokenTool(&lines, id: "deepseek_harness", name: "DeepSeek Harness",
                             range: usage.deepseekHarness.ranges.get(range))
@@ -312,6 +336,22 @@ enum UsageSummaryBuilder {
             appendTokenTool(&lines, id: "kimicode", name: "Kimi Code",
                             range: usage.kimicode.ranges.get(range), includesCost: false)
         }
+        if visibility.musecode {
+            appendTokenTool(&lines, id: "musecode", name: "Muse Code",
+                            range: usage.musecode.ranges.get(range), reasonIncludedInOutput: true)
+        }
+        if visibility.cmdcode {
+            appendTokenTool(&lines, id: "cmdcode", name: "Command Code",
+                            range: usage.cmdcode.ranges.get(range))
+        }
+        if visibility.devin {
+            appendTokenTool(&lines, id: "devin", name: "Devin",
+                            range: usage.devin.ranges.get(range))
+        }
+        if visibility.minimax {
+            appendTokenTool(&lines, id: "minimax", name: "MiniMax Code",
+                            range: usage.minimax.ranges.get(range))
+        }
         return lines
     }
 
@@ -325,33 +365,50 @@ enum UsageSummaryBuilder {
             .first { $0.id == id }
     }
 
+    private static func appendQoderCli(_ lines: inout [Line], id: String, name: String,
+                                       range r: QoderRange) {
+        let line = Line(
+            id: id, name: name, cost: nil,
+            tokens: r.totalTokens, sessions: r.sessions, calls: r.calls,
+            input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+            reason: nil, hit: r.hit > 0 ? r.hit : nil,
+            extra: r.credits > 0 ? "\(Fmt.credits(r.credits)) Credits" : nil
+        )
+        if !line.isEmpty { lines.append(line) }
+    }
+
     private static func appendTokenTool(
         _ lines: inout [Line], id: String, name: String, range r: TokenUsageRange,
-        includesCost: Bool = true
+        includesCost: Bool = true, includesCredits: Bool = false,
+        reasonIncludedInOutput: Bool = false
     ) {
+        let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
+        let extra = includesCredits && r.credits > 0
+            ? "\(Fmt.credits(r.credits)) Credits" : nil
         let line = Line(
-            id: id, name: name, cost: includesCost ? r.cost : nil,
-            tokens: r.in + r.out + r.cr + r.cw + r.reason, sessions: r.sessions, calls: nil,
+            id: id, name: name, cost_cny: includesCost ? r.cost_cny : nil,
+            cost: includesCost ? r.cost : nil,
+            tokens: total, sessions: r.sessions, calls: nil,
             input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
             reason: r.reason > 0 ? r.reason : nil,
-            hit: r.hit > 0 ? r.hit : nil, extra: nil
+            hit: r.hit > 0 ? r.hit : nil, extra: extra
         )
         if !line.isEmpty { lines.append(line) }
     }
 
     private static func formatLine(_ line: Line) -> String {
         var parts: [String] = []
-        if let cost = line.cost, cost > 0 {
-            parts.append(String(format: "$%.2f", cost))
+        if (line.cost ?? 0) > 0 || (line.cost_cny ?? 0) > 0 {
+            parts.append(nativeMoney(line.cost ?? 0, line.cost_cny))
         }
         if let tokens = line.tokens, tokens > 0 {
             parts.append("\(Fmt.human(tokens)) tok")
         }
         if let sessions = line.sessions, sessions > 0 {
-            parts.append("\(sessions) 会话")
+            parts.append(L("%@ 会话", sessions))
         }
         if let calls = line.calls, calls > 0 {
-            parts.append("\(calls) 次调用")
+            parts.append(L("%@ 次调用", calls))
         }
         if let extra = line.extra, !extra.isEmpty {
             parts.append(extra)

@@ -61,13 +61,13 @@ struct RangeBoundary: Codable, Equatable {
 }
 
 enum PeerLoadStage: String {
-    case configuration = "配置"
-    case read = "读取"
+    case configuration = "配置" // l10n-ignore
+    case read = "读取" // l10n-ignore
     case json = "JSON"
-    case timestamp = "时间戳"
-    case usage = "用量结构"
-    case dashboard = "面板数据"
-    case rangeBounds = "时间范围"
+    case timestamp = "时间戳" // l10n-ignore
+    case usage = "用量结构" // l10n-ignore
+    case dashboard = "面板数据" // l10n-ignore
+    case rangeBounds = "时间范围" // l10n-ignore
 }
 
 struct PeerLoadIssue: Identifiable {
@@ -76,7 +76,7 @@ struct PeerLoadIssue: Identifiable {
     var stage: PeerLoadStage
     var detail: String
 
-    var summary: String { "\(file)：\(stage.rawValue)失败，\(detail)" }
+    var summary: String { L("%@：%@失败，%@", file, L(stage.rawValue), detail) }
 }
 
 struct PeerLoadReport {
@@ -275,7 +275,7 @@ final class SyncManager {
     }
 
     private static let providerQuotaIDs: Set<String> = [
-        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity",
+        "cursor", "grok_bot", "zed", "sub2api", "zai", "antigravity", "devin", "minimax",
     ]
     private static let providerSettingKeys: Set<String> = [
         "sub2api_base_url", "zai_region", "zai_usage_scope",
@@ -334,7 +334,7 @@ final class SyncManager {
                 issues: [PeerLoadIssue(
                     file: Self.configPath.path,
                     stage: .configuration,
-                    detail: "同步配置缺失或无法解析"
+                    detail: L("同步配置缺失或无法解析")
                 )]
             )
         }
@@ -342,7 +342,7 @@ final class SyncManager {
         guard FileManager.default.fileExists(atPath: dir) else {
             return PeerLoadReport(
                 peers: [],
-                issues: [PeerLoadIssue(file: dir, stage: .read, detail: "同步目录不存在")]
+                issues: [PeerLoadIssue(file: dir, stage: .read, detail: L("同步目录不存在"))]
             )
         }
         var peers: [PeerDevice] = []
@@ -373,7 +373,7 @@ final class SyncManager {
             let raw: [String: Any]
             do {
                 guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    issues.append(PeerLoadIssue(file: file, stage: .json, detail: "顶层不是对象"))
+                    issues.append(PeerLoadIssue(file: file, stage: .json, detail: L("顶层不是对象")))
                     continue
                 }
                 raw = value
@@ -382,7 +382,7 @@ final class SyncManager {
                 continue
             }
             guard let ts = raw["_ts"] as? Int else {
-                issues.append(PeerLoadIssue(file: file, stage: .timestamp, detail: "缺少 _ts"))
+                issues.append(PeerLoadIssue(file: file, stage: .timestamp, detail: L("缺少 _ts")))
                 continue
             }
             var cleaned = raw
@@ -400,7 +400,7 @@ final class SyncManager {
                 do {
                     guard JSONSerialization.isValidJSONObject(rawDashboard) else {
                         throw NSError(domain: "TokeiPeer", code: 1,
-                                      userInfo: [NSLocalizedDescriptionKey: "不是有效 JSON 对象"])
+                                      userInfo: [NSLocalizedDescriptionKey: L("不是有效 JSON 对象")])
                     }
                     let dashboardData = try JSONSerialization.data(withJSONObject: rawDashboard)
                     dashboard = try JSONDecoder().decode(PeerDashboardSnapshot.self, from: dashboardData)
@@ -414,7 +414,7 @@ final class SyncManager {
                 do {
                     guard JSONSerialization.isValidJSONObject(rawBounds) else {
                         throw NSError(domain: "TokeiPeer", code: 2,
-                                      userInfo: [NSLocalizedDescriptionKey: "不是有效 JSON 对象"])
+                                      userInfo: [NSLocalizedDescriptionKey: L("不是有效 JSON 对象")])
                     }
                     let boundsData = try JSONSerialization.data(withJSONObject: rawBounds)
                     rangeBounds = try JSONDecoder().decode([String: RangeBoundary].self, from: boundsData)
@@ -448,6 +448,14 @@ final class SyncManager {
             let pairs = rangePairs(for: peer)
             mergeRanges(&u.claude.ranges, peer.usage.claude.ranges, pairs)
             mergeRanges(&u.codex.ranges, peer.usage.codex.ranges, pairs)
+            if let localReserve = u.codex.reserveRanges,
+               let peerReserve = peer.usage.codex.reserveRanges {
+                var merged = localReserve
+                mergeRanges(&merged, peerReserve, pairs)
+                u.codex.reserveRanges = merged
+            } else if u.codex.reserveRanges == nil {
+                u.codex.reserveRanges = peer.usage.codex.reserveRanges
+            }
             mergeRanges(&u.gemini.ranges, peer.usage.gemini.ranges, pairs)
             mergeRanges(&u.grok.ranges, peer.usage.grok.ranges, pairs)
             u.grok.model = mergeModelName(u.grok.model, peer.usage.grok.model)
@@ -464,6 +472,8 @@ final class SyncManager {
             u.qoder.model = mergeModelName(u.qoder.model, peer.usage.qoder.model)
             mergeRanges(&u.qodercli.ranges, peer.usage.qodercli.ranges, pairs)
             u.qodercli.model = mergeModelName(u.qodercli.model, peer.usage.qodercli.model)
+            mergeRanges(&u.qodercliCN.ranges, peer.usage.qodercliCN.ranges, pairs)
+            u.qodercliCN.model = mergeModelName(u.qodercliCN.model, peer.usage.qodercliCN.model)
             mergeRanges(&u.hermes.ranges, peer.usage.hermes.ranges, pairs)
             mergeRanges(&u.zcode.ranges, peer.usage.zcode.ranges, pairs)
             mergeRanges(&u.mimocode.ranges, peer.usage.mimocode.ranges, pairs)
@@ -472,10 +482,15 @@ final class SyncManager {
             mergeRanges(&u.prime_agent.ranges, peer.usage.prime_agent.ranges, pairs)
             mergeRanges(&u.workbuddy.ranges, peer.usage.workbuddy.ranges, pairs)
             mergeRanges(&u.workbuddyAI.ranges, peer.usage.workbuddyAI.ranges, pairs)
+            mergeRanges(&u.codebuddy.ranges, peer.usage.codebuddy.ranges, pairs)
             mergeRanges(&u.deepseekHarness.ranges, peer.usage.deepseekHarness.ranges, pairs)
             mergeRanges(&u.opencode.ranges, peer.usage.opencode.ranges, pairs)
             mergeRanges(&u.qwencode.ranges, peer.usage.qwencode.ranges, pairs)
             mergeRanges(&u.kimicode.ranges, peer.usage.kimicode.ranges, pairs)
+            mergeRanges(&u.musecode.ranges, peer.usage.musecode.ranges, pairs)
+            mergeRanges(&u.cmdcode.ranges, peer.usage.cmdcode.ranges, pairs)
+            mergeRanges(&u.devin.ranges, peer.usage.devin.ranges, pairs)
+            mergeRanges(&u.minimax.ranges, peer.usage.minimax.ranges, pairs)
         }
         return u
     }
@@ -666,7 +681,7 @@ final class SyncManager {
             var d = dst.get(pair.dst), s = src.get(pair.src)
             d.tasks += s.tasks; d.completed += s.completed; d.failed += s.failed
             d.in += s.in; d.out += s.out; d.cr += s.cr; d.cw += s.cw
-            d.cost += s.cost; d.sessions += s.sessions
+            d.reason += s.reason; d.cost += s.cost; d.sessions += s.sessions
             d.hit = hitRate(cached: d.cr, input: d.in, cacheWrite: d.cw)
             mergeTokenModels(&d.models, s.models)
             dst.set(pair.dst, d)
@@ -677,7 +692,8 @@ final class SyncManager {
         for pair in pairs {
             var d = dst.get(pair.dst), s = src.get(pair.src)
             d.in += s.in; d.out += s.out; d.cr += s.cr; d.cw += s.cw
-            d.reason += s.reason; d.cost += s.cost; d.sessions += s.sessions
+            d.reason += s.reason; d.cost += s.cost; d.credits += s.credits; d.sessions += s.sessions
+            d.cost_cny = (d.cost_cny ?? 0) + (s.cost_cny ?? 0)
             d.hit = hitRate(cached: d.cr, input: d.in, cacheWrite: d.cw)
             mergeTokenModels(&d.models, s.models)
             dst.set(pair.dst, d)
@@ -751,7 +767,16 @@ final class SyncManager {
                 dst[idx].cw += m.cw
                 dst[idx].reason += m.reason
                 dst[idx].cost += m.cost
-                if dst[idx].name == "未知" && m.name != "未知" {
+                dst[idx].credits += m.credits
+                dst[idx].cost_cny = (dst[idx].cost_cny ?? 0) + (m.cost_cny ?? 0)
+                // 本机这条没带单价（旧版采集器）而对端带了，就用对端的，免得合并后单价消失
+                if dst[idx].pin == 0 && dst[idx].pout == 0 && (m.pin > 0 || m.pout > 0) {
+                    dst[idx].pin = m.pin
+                    dst[idx].pout = m.pout
+                    dst[idx].pcr = m.pcr
+                    dst[idx].pref = m.pref
+                }
+                if dst[idx].name == "未知" && m.name != "未知" { // l10n-ignore
                     dst[idx].name = m.name
                 }
             } else {
@@ -1159,11 +1184,11 @@ final class SyncManager {
     func synchronize(snapshotCommand: SyncCommand,
                      completion: @escaping (GitSyncResult) -> Void) {
         guard let cfg = config else {
-            completion(GitSyncResult(code: .invalidConfiguration, output: "同步配置不可用"))
+            completion(GitSyncResult(code: .invalidConfiguration, output: L("同步配置不可用")))
             return
         }
         guard let deviceID = Self.validDeviceID(cfg.device_id) else {
-            completion(GitSyncResult(code: .invalidConfiguration, output: "设备名不合法"))
+            completion(GitSyncResult(code: .invalidConfiguration, output: L("设备名不合法")))
             return
         }
         let dir = Self.resolvedSyncDir(cfg)
@@ -1173,7 +1198,7 @@ final class SyncManager {
               isDirectory.boolValue else {
             completion(GitSyncResult(
                 code: .invalidRepository,
-                output: "同步目录不是普通 Git 仓库：\(dir)"
+                output: L("同步目录不是普通 Git 仓库：%@", dir)
             ))
             return
         }
@@ -1258,9 +1283,9 @@ final class SyncManager {
             let code = Self.resultCode(for: proc.terminationStatus)
             let fallback: String
             switch code {
-            case .success: fallback = "GitHub 已同步"
-            case .busy: fallback = "另一同步任务正在运行"
-            default: fallback = "同步失败，退出码 \(proc.terminationStatus)"
+            case .success: fallback = L("GitHub 已同步")
+            case .busy: fallback = L("另一同步任务正在运行")
+            default: fallback = L("同步失败，退出码 %@", proc.terminationStatus)
             }
             let result = GitSyncResult(
                 code: code,

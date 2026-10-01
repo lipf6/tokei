@@ -31,10 +31,10 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
 
     init(
         timestamp: Int,
-        claudeFiveHourRemaining: Double?,
-        claudeWeekRemaining: Double?,
-        claudeFableWeekRemaining: Double?,
-        codexWeekRemaining: Double?,
+        claudeFiveHourRemaining: Double? = nil,
+        claudeWeekRemaining: Double? = nil,
+        claudeFableWeekRemaining: Double? = nil,
+        codexWeekRemaining: Double? = nil,
         kimiFiveHourRemaining: Double? = nil,
         kimiWeekRemaining: Double? = nil,
         claudeActivity: [QuotaModelActivity] = [],

@@ -80,8 +80,8 @@ class PricingCacheTests(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(USAGE.update_prices(), 0)
 
-            self.assertTrue(scan_cache.exists())
-            saved_cache = json.loads(scan_cache.read_text(encoding="utf-8"))
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache)):
+                saved_cache, _ = USAGE._read_scan_cache_file()
             self.assertEqual(saved_cache["v"], USAGE._SCAN_CACHE_VERSION)
             self.assertIn("test/model", saved_cache["_pricing_changed_models"])
             self.assertTrue(saved_cache["_pricing_changed"])
@@ -117,8 +117,8 @@ class PricingCacheTests(unittest.TestCase):
                 **historical,
                 "retired": True,
             })
-            changed = json.loads(scan_cache.read_text(encoding="utf-8")).get(
-                "_pricing_changed_models", [])
+            with mock.patch.object(USAGE, "_SCAN_CACHE_FILE", str(scan_cache)):
+                changed = USAGE._read_scan_cache_file()[0].get("_pricing_changed_models", [])
             self.assertNotIn("historical/model", changed)
 
     def test_price_fingerprint_keeps_all_token_scan_caches(self):
@@ -227,6 +227,60 @@ class PricingCacheTests(unittest.TestCase):
             self.assertEqual(shipped["models"][model], price)
         for alias, model in USAGE._BUILTIN_OVERRIDE_ALIASES.items():
             self.assertEqual(shipped["aliases"][alias], model)
+
+    def test_codex_model_rows_show_the_price_their_cost_used(self):
+        """卡片上的单价必须就是算成本用的那个价：没有公开价的按 gpt-5.5 估算，要标出参照。"""
+        rows = {row["name"]: row for row in USAGE._format_token_models({
+            "gpt-6.1-sol": {"in": 1_000_000, "cost": 2.0},
+            "codex-auto-review": {"in": 1_000_000, "cost": 5.0},
+        }, price_model=USAGE._codex_price_model)}
+
+        sol = rows["GPT-6.1 Sol"]
+        self.assertEqual((sol["pin"], sol["pout"], sol["pcr"]), (2.0, 10.0, 0.1))
+        self.assertIsNone(sol["pref"], "官方价就是它自己的价")
+        # 10 万 token：避开超过 27.2 万输入时的长上下文加价
+        self.assertAlmostEqual(USAGE._codex_estimated_cost("gpt-6.1-sol", 100_000, 0, 0), 0.2)
+
+        review = rows["Codex Auto Review"]
+        self.assertEqual((review["pin"], review["pout"]), (5.0, 30.0))
+        self.assertEqual(review["pref"], "GPT-5.5")
+        self.assertAlmostEqual(USAGE._codex_estimated_cost("codex-auto-review", 100_000, 0, 0),
+                               review["pin"] / 10)
+
+    def test_unlisted_models_use_the_previous_version_of_their_line(self):
+        """价目表里没有的沿用同一版本线上一个版本的价：先找同档位，再找基础款。"""
+        catalog = {
+            "minimax/minimax-m3": {"in": 0.3, "out": 1.2},
+            "minimax/minimax-m2.7": {"in": 0.3, "out": 1.2},
+            "minimax/minimax-01": {"in": 0.2, "out": 1.1},
+            "openai/gpt-6-sol": {"in": 2.0, "out": 10.0},
+            "openai/gpt-6.1-sol": {"in": 2.0, "out": 10.0},
+            "openai/gpt-6-astra": {"in": 10.0, "out": 50.0},
+            "deepseek/deepseek-v4-pro": {"in": 0.9, "out": 1.9},
+            "deepseek/deepseek-v4.1-flash": {"in": 0.3, "out": 1.2},
+            "tencent/hy4-preview": {"in": 0.834, "out": 2.501},
+            "vendor-a/twin-2": {"in": 1.0, "out": 1.0},
+            "vendor-b/twin-2": {"in": 2.0, "out": 2.0},
+        }
+        with mock.patch.object(USAGE, "_PRICING_DB", catalog), \
+             mock.patch.object(USAGE, "_DEFAULT_PRICES", {}), \
+             mock.patch.object(USAGE, "_OV_MODELS", {}), \
+             mock.patch.object(USAGE, "_CATALOG_INDEX", None):
+            cases = {
+                "MiniMax-M3.1-Flash-Preview": "minimax/minimax-m3",   # 没有 flash 档，退到基础款
+                "gpt-6.2-sol": "openai/gpt-6.1-sol",                  # 同档位里最近的上一版
+                "deepseek-v4.2-flash": "deepseek/deepseek-v4.1-flash",  # 不再被家族兜底按 pro 算
+                "Hy4-dev": "tencent/hy4-preview",                     # 同版本只有 preview 也认
+                "twin-3": None,                                       # 两家都有，说不清是谁
+                "codex-auto-review": None,                            # 没有版本号，不猜
+            }
+            for model, expected in cases.items():
+                with self.subTest(model=model):
+                    self.assertEqual(USAGE._pricing_id(model), expected)
+
+            rows = USAGE._format_token_models({"MiniMax-M3.1-Flash-Preview": {"in": 1000, "cost": 0.1}})
+            self.assertEqual((rows[0]["pin"], rows[0]["pout"]), (0.3, 1.2))
+            self.assertEqual(rows[0]["pref"], "MiniMax M3", "借来的单价要标出参照")
 
     def test_current_official_and_snapshot_prices_resolve_exactly(self):
         self.assertEqual(USAGE._resolve_id("gpt-5.6"), "openai/gpt-5.6-sol")

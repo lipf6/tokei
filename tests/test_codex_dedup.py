@@ -13,6 +13,35 @@ def event(ts, day, total, last, cost):
 
 
 class CodexDedupedDaysTests(unittest.TestCase):
+    def test_legacy_model_cache_without_credits_accepts_new_events(self):
+        first = event(
+            "2026-07-10T00:00:00+00:00",
+            "2026-07-10",
+            (100, 80, 5, 2),
+            (100, 80, 5, 2),
+            1.0,
+        ) + ["openai/gpt-5.4"]
+        second = event(
+            "2026-07-10T01:00:00+00:00",
+            "2026-07-10",
+            (150, 120, 8, 3),
+            (50, 40, 3, 1),
+            0.5,
+        ) + ["openai/gpt-5.4"]
+
+        days = {}
+        USAGE._codex_add_event(days, first)
+        days["2026-07-10"]["models"]["openai/gpt-5.4"].pop("credits")
+
+        USAGE._codex_add_event(days, second)
+
+        usage = days["2026-07-10"]["models"]["openai/gpt-5.4"]
+        self.assertEqual(usage["in"], 30)
+        self.assertEqual(usage["out"], 8)
+        self.assertEqual(usage["cr"], 120)
+        self.assertEqual(usage["reason"], 3)
+        self.assertEqual(usage["credits"], 0.0)
+
     def test_replayed_parent_snapshot_is_counted_once(self):
         parent = event(
             "2026-07-10T00:00:00+00:00",
@@ -130,7 +159,7 @@ class CodexDedupedDaysTests(unittest.TestCase):
 
 
 class CodexScanDedupTests(unittest.TestCase):
-    def session_meta(self, sid, forked_from_id=None):
+    def session_meta(self, sid, forked_from_id=None, history_base=None):
         payload = {
             "session_id": forked_from_id or sid,
             "id": sid,
@@ -139,6 +168,9 @@ class CodexScanDedupTests(unittest.TestCase):
         }
         if forked_from_id:
             payload["forked_from_id"] = forked_from_id
+        if history_base is not None:
+            payload["history_mode"] = "paginated"
+            payload["history_base"] = history_base
         return json.dumps({
             "timestamp": "2024-01-08T00:00:00Z",
             "type": "session_meta",
@@ -149,7 +181,7 @@ class CodexScanDedupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rollout-child.jsonl"
             path.write_text(self.session_meta("child", "parent") + "\n", encoding="utf-8")
-            session_id, parent_id = USAGE._codex_session_meta(path)
+            session_id, parent_id, _ = USAGE._codex_session_meta(path)
 
         self.assertEqual(session_id, "child")
         self.assertEqual(parent_id, "parent")
@@ -170,10 +202,101 @@ class CodexScanDedupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rollout-child.jsonl"
             path.write_text(json.dumps(meta) + "\n", encoding="utf-8")
-            session_id, parent_id = USAGE._codex_session_meta(path)
+            session_id, parent_id, _ = USAGE._codex_session_meta(path)
 
         self.assertEqual(session_id, "child")
         self.assertEqual(parent_id, "parent")
+
+    def test_session_meta_reads_the_page_a_continuation_follows(self):
+        base = {"thread_id": "session-A", "end_ordinal_exclusive": 20467}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-page.jsonl"
+            path.write_text(self.session_meta("session-A", history_base=base) + "\n",
+                            encoding="utf-8")
+            self.assertEqual(USAGE._codex_session_meta(path)[2], base)
+
+    def paged_entry(self, events, base=None, ts="2026-09-20T01:00:00+00:00", ids=None):
+        entry = {"session_id": "session-A", "event_count": events,
+                 "last_event_ts": ts, "parsed_size": events * 10, "history_base": base}
+        if ids is not None:
+            entry["response_ids"] = ids
+        return entry
+
+    def test_continuation_pages_without_ids_are_both_kept(self):
+        """旧式续页没有 response_ids。它事件更少，以前会被当成前一页的副本整个丢掉。"""
+        file_cache = {
+            "page-a.jsonl": self.paged_entry(2366),
+            "page-b.jsonl": self.paged_entry(
+                1379, {"thread_id": "session-A", "end_ordinal_exclusive": 20467},
+                ts="2026-09-20T02:00:00+00:00"),
+        }
+        self.assertEqual(sorted(USAGE._codex_canonical_file_cache(file_cache)),
+                         ["page-a.jsonl", "page-b.jsonl"])
+
+    def test_mirrors_of_one_continuation_page_count_once(self):
+        """同一页在 sessions/ 与 archived_sessions/ 各有一份时只算最完整的那份。"""
+        base = {"thread_id": "session-A", "end_ordinal_exclusive": 20467}
+        file_cache = {
+            "sessions/page-a.jsonl": self.paged_entry(2366),
+            "sessions/page-b.jsonl": self.paged_entry(1300, base),
+            "archived/page-b.jsonl": self.paged_entry(1379, dict(base)),
+        }
+        self.assertEqual(sorted(USAGE._codex_canonical_file_cache(file_cache)),
+                         ["archived/page-b.jsonl", "sessions/page-a.jsonl"])
+
+    def test_two_copies_of_a_first_page_still_count_once(self):
+        file_cache = {"sessions/a.jsonl": self.paged_entry(10),
+                      "archived/a.jsonl": self.paged_entry(12)}
+        self.assertEqual(list(USAGE._codex_canonical_file_cache(file_cache)),
+                         ["archived/a.jsonl"])
+
+    def test_pages_cached_before_the_upgrade_read_their_header_once(self):
+        """老缓存没存 history_base：只在需要区分页时读一次文件头并记下来。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            page_a = Path(tmp) / "rollout-a.jsonl"
+            page_b = Path(tmp) / "rollout-b.jsonl"
+            base = {"thread_id": "session-A", "end_ordinal_exclusive": 2}
+            page_a.write_text(self.session_meta("session-A") + "\n", encoding="utf-8")
+            page_b.write_text(self.session_meta("session-A", history_base=base) + "\n",
+                              encoding="utf-8")
+            file_cache = {str(page_a): self.paged_entry(2), str(page_b): self.paged_entry(1)}
+            for entry in file_cache.values():
+                del entry["history_base"]
+            self.assertEqual(len(USAGE._codex_canonical_file_cache(file_cache)), 2)
+            self.assertEqual(file_cache[str(page_b)]["history_base"], base)
+
+    def test_a_lone_legacy_file_never_touches_the_disk(self):
+        file_cache = {"a.jsonl": {"session_id": "s", "event_count": 3},
+                      "b.jsonl": {"session_id": "s", "event_count": 2, "response_ids": ["x"]}}
+        with mock.patch.object(USAGE, "_codex_session_meta",
+                               side_effect=AssertionError("no header read needed")):
+            self.assertEqual(len(USAGE._codex_canonical_file_cache(file_cache)), 2)
+
+    def test_scan_counts_both_pages_of_a_paginated_session(self):
+        """端到端：前页累计 300（100 + 200），续页再加 50，合计 350。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            page_a = Path(tmp) / "rollout-page-a.jsonl"
+            page_a.write_text("\n".join([
+                self.session_meta("session-A"),
+                self.turn_context("2024-01-08T00:00:00Z", "gpt-5.5"),
+                self.token_count("2024-01-08T00:01:00Z", (100, 0, 0, 0), (100, 0, 0, 0)),
+                self.token_count("2024-01-08T00:02:00Z", (300, 0, 0, 0), (200, 0, 0, 0)),
+            ]) + "\n", encoding="utf-8")
+            page_b = Path(tmp) / "rollout-page-b.jsonl"
+            page_b.write_text("\n".join([
+                self.session_meta("session-A", history_base={
+                    "thread_id": "session-A", "end_ordinal_exclusive": 2}),
+                self.turn_context("2024-01-08T00:03:00Z", "gpt-5.5"),
+                self.token_count("2024-01-08T00:04:00Z", (350, 0, 0, 0), (50, 0, 0, 0)),
+            ]) + "\n", encoding="utf-8")
+            with mock.patch.object(USAGE, "CODEX_DIR", tmp), \
+                 mock.patch.object(USAGE, "CODEX_ARCHIVED_DIR", str(Path(tmp) / "archived")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                result = USAGE.scan_codex(self.bounds(), {"v": USAGE._SCAN_CACHE_VERSION})
+
+        usage = result["ranges"]["all"]
+        self.assertEqual(usage["in"], 350)
+        self.assertEqual(len(usage["sessions"]), 1, "两页是同一次会话")
 
     def token_count(self, ts, total, last, ordinal=None, rate_limits=None):
         record = {"timestamp": ts}
@@ -259,6 +382,46 @@ class CodexScanDedupTests(unittest.TestCase):
         self.assertEqual(models["openai/gpt-5.4"]["reason"], 4)
         self.assertEqual(models["openai/gpt-5.5"]["in"], 10)
         self.assertEqual(models["openai/gpt-5.5"]["cr"], 40)
+
+    def test_late_gpt6_model_fields_repair_cached_unknown_without_changing_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-late-models.jsonl"
+            records = [self.session_meta("late-models")]
+            for index, variant in enumerate(("astra", "sol", "luna")):
+                records.append(json.dumps({
+                    "timestamp": f"2024-01-08T00:0{index * 2}:00Z",
+                    "type": "turn_context",
+                    "payload": {"permission_profile": {"description": "x" * 12_000,
+                                                        "model": "nested-decoy"},
+                                "model": f"gpt-6-{variant}"},
+                }))
+                records.append(self.token_count(
+                    f"2024-01-08T00:0{index * 2 + 1}:00Z",
+                    (100 * (index + 1), 80 * (index + 1), 10 * (index + 1), 4 * (index + 1)),
+                    (100, 80, 10, 4)))
+            path.write_text("\n".join(records) + "\n", encoding="utf-8")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+            original_reader = USAGE._iter_codex_usage_records
+
+            def old_reader(*args, **kwargs):
+                return original_reader(*args, model_limit=4096, **kwargs)
+
+            with mock.patch.object(USAGE, "CODEX_DIR", tmp), \
+                 mock.patch.object(USAGE, "CODEX_ARCHIVED_DIR", str(Path(tmp) / "archive")), \
+                 mock.patch.object(USAGE, "fetch_codex_live_limits", return_value=None):
+                with mock.patch.object(USAGE, "_CODEX_PARSER_VERSION", 7), \
+                     mock.patch.object(USAGE, "_iter_codex_usage_records", side_effect=old_reader):
+                    before = USAGE.scan_codex(self.bounds(), cache)["ranges"]["all"]
+                self.assertIn("unknown", before["models"])
+                after = USAGE.scan_codex(self.bounds(), cache)["ranges"]["all"]
+                warm = USAGE.scan_codex(self.bounds(), cache)["ranges"]["all"]
+
+        self.assertEqual(warm, after)
+        self.assertEqual(set(after["models"]), {f"openai/gpt-6-{v}" for v in ("astra", "sol", "luna")})
+        for field in ("in", "out", "cached", "reason"):
+            self.assertEqual(before.get(field), after.get(field))
+        for model in after["models"].values():
+            self.assertEqual((model["in"], model["cr"], model["out"], model["reason"]), (20, 80, 10, 4))
 
     def test_scan_ignores_runtime_quota_label_for_model_attribution(self):
         # rate_limits.limit_name 是额度/路由名，不是用户选的模型，
@@ -455,13 +618,16 @@ class CodexScanDedupTests(unittest.TestCase):
             USAGE._CODEX_PARSER_VERSION,
         )
 
-    def test_parser_upgrade_reuses_nonempty_model_v2_cache(self):
+    def test_parser_upgrade_rescans_nonempty_model_v2_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             sessions = root / "sessions"
             sessions.mkdir()
             path = sessions / "rollout-cached.jsonl"
-            path.write_text("{}\n", encoding="utf-8")
+            path.write_text(self.session_meta("cached") + "\n" +
+                            self.turn_context("2024-01-08T00:00:00Z", "gpt-5.4") + "\n" +
+                            self.token_count("2024-01-08T00:01:00Z", (100, 80, 5, 2),
+                                             (100, 80, 5, 2)) + "\n", encoding="utf-8")
             source_path = str(path.resolve())
             st = path.stat()
             cached_event = event(
@@ -502,10 +668,11 @@ class CodexScanDedupTests(unittest.TestCase):
                     "dedupe_open": True,
                     "canonical": True,
                 }
-                with mock.patch.object(USAGE, "_iter_codex_usage_records") as iterator:
+                with mock.patch.object(USAGE, "_iter_codex_usage_records",
+                                       wraps=USAGE._iter_codex_usage_records) as iterator:
                     result = USAGE.scan_codex(self.bounds(), cache)
 
-        iterator.assert_not_called()
+        iterator.assert_called_once()
         usage = result["ranges"]["all"]
         self.assertEqual(usage["in"], 100)
         self.assertEqual(usage["cached"], 80)
@@ -898,7 +1065,7 @@ class ScanCacheMigrationTests(unittest.TestCase):
                 migrated = USAGE._codex_migrate_event_cache(cache["codex"])
                 cache["_dirty"] = True
                 USAGE._save_scan_cache(cache)
-                stored = json.loads(cache_path.read_text(encoding="utf-8"))
+                stored, _ = USAGE._read_scan_cache_file()
                 sidecar = USAGE._codex_event_cache_path(str(source))
                 cached_events = list(USAGE._iter_codex_cached_events(str(source)))
 
@@ -929,6 +1096,17 @@ class ScanCacheMigrationTests(unittest.TestCase):
 
 
 class CodexTokenLineReaderTests(unittest.TestCase):
+    def test_model_after_large_permission_profile_across_chunks(self):
+        context = json.dumps({"timestamp": "2026-09-23T01:00:00Z", "type": "turn_context",
+                              "payload": {"permission_profile": {"entries": "x" * 12_000,
+                                                                 "model": "nested-decoy"},
+                                          "model": "gpt-6-astra"}}).encode()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout.jsonl"
+            path.write_bytes(context + b"\n")
+            self.assertEqual(list(USAGE._iter_codex_usage_records(path, chunk_size=1024)),
+                             [("model", "gpt-6-astra")])
+
     def test_accepts_reordered_top_level_fields_and_ignores_nested_type_decoys(self):
         model = json.dumps({
             "payload": {"model": "gpt-5.5"},

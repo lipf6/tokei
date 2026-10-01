@@ -14,12 +14,15 @@ final class AppDelegate {
     static let claudeColor = NSColor(red: 0.92, green: 0.52, blue: 0.40, alpha: 1)
     static let codexColor  = NSColor(red: 0.42, green: 0.68, blue: 0.98, alpha: 1)
     static let grokColor   = NSColor(red: 0.65, green: 0.68, blue: 0.75, alpha: 1)
-    static let kimiColor   = NSColor(red: 0.20, green: 0.78, blue: 0.66, alpha: 1)
+    static let kimiColor = NSColor(red: 168.0 / 255, green: 85.0 / 255, blue: 247.0 / 255, alpha: 1)
+    static let kimicodeColor = kimiColor
 }
 
 @main
 struct MenuBarQuotaSourceCheck {
     static func main() throws {
+        // 断言的是中文输出，不能随跑测试那台机器的系统语言变化。
+        L10n.forcedLanguage = .zh
         _ = NSApplication.shared
 
         try checkSourceIdentity()
@@ -38,7 +41,7 @@ struct MenuBarQuotaSourceCheck {
     private static func checkSourceIdentity() throws {
         let order = MenuBarQuotaSource.allCases.map(\.rawValue)
         try expect(order == ["claude5h", "claudeWeek", "claudeFable",
-                             "codex5h", "codexWeek", "grok", "kimi"],
+                             "codex5h", "codexWeek", "kimi5h", "kimiSubscription", "grok", "kimi"],
                    "quota source order changed: \(order)")
 
         // 这两个 key 已经发布过，存的本来就是这两个窗口的开关。
@@ -56,7 +59,7 @@ struct MenuBarQuotaSourceCheck {
         // 标签必须写清是哪个窗口，这是用户能分辨谁是谁的前提。
         let labels = MenuBarQuotaSource.allCases.map(\.label)
         try expect(labels == ["Claude 5h", "Claude 周", "Claude Fable",
-                              "Codex 5h", "Codex 周", "Grok", "Kimi 周"],
+                              "Codex 5h", "Codex 周", "Kimi 5h", "Kimi 订阅", "Grok", "Kimi 周"],
                    "window labels changed: \(labels)")
 
         let defaultOn = MenuBarQuotaSource.allCases.filter(\.defaultEnabled).map(\.rawValue)
@@ -64,7 +67,7 @@ struct MenuBarQuotaSourceCheck {
                    "only the two historically-on windows may default on: \(defaultOn)")
 
         let windows = MenuBarQuotaSource.allCases.map(\.window)
-        try expect(windows == [.fiveHour, .week, .week, .fiveHour, .week, nil, .week],
+        try expect(windows == [.fiveHour, .week, .week, .fiveHour, .week, .fiveHour, nil, nil, .week],
                    "window kinds changed")
     }
 
@@ -118,26 +121,35 @@ struct MenuBarQuotaSourceCheck {
 
         let usage = try decodeFixture(fixtureJSON)
         let used = MenuBarQuotaSource.allCases.map { $0.reading(in: usage).value }
-        try expect(used == [20, 40, 10, 88, 35, 25, 45], "reading mapped to the wrong field: \(used)")
+        try expect(used == [20, 40, 10, 88, 35, 15, 55, 25, 45], "reading mapped to the wrong field: \(used)")
 
         // 模型里存已用百分比，状态栏显示剩余，别把 100-x 丢了。
         let metrics = MenuBarQuotaSource.metrics(in: usage)
-        try expect(metrics.map(\.value) == ["80", "60", "90", "12", "65", "75", "55"],
+        try expect(metrics.map(\.value) == ["80", "60", "90", "12", "65", "85", "45", "75", "55"],
                    "remaining conversion or order wrong: \(metrics.map(\.value))")
 
         // 账号没有这个窗口 → 整项不出现。
         var missingFable = usage
         missingFable.claude.qf = nil
         try expect(MenuBarQuotaSource.metrics(in: missingFable).map(\.kind.displayName)
-                    == ["Claude 5h", "Claude 周", "Codex 5h", "Codex 周", "Grok", "Kimi 周"],
+                    == ["Claude 5h", "Claude 周", "Codex 5h", "Codex 周",
+                        "Kimi 5h", "Kimi 订阅", "Grok", "Kimi 周"],
                    "a nil window must drop out entirely")
 
-        // 数据过期 → 也不出现，别在状态栏上挂个陈旧数字。
+        // 数据过期 → 照常显示上次读到的数（标记 stale，状态栏变淡），不再整项消失。
         var staleCodex5h = usage
         staleCodex5h.codex.p5_stale = true
-        try expect(!MenuBarQuotaSource.metrics(in: staleCodex5h)
-                    .contains { $0.kind.displayName == "Codex 5h" },
-                   "stale window must be excluded")
+        let stale = MenuBarQuotaSource.metrics(in: staleCodex5h)
+            .first { $0.kind.displayName == "Codex 5h" }
+        try expect(stale?.value == "12" && stale?.stale == true && stale?.remaining == 12,
+                   "a stale window keeps its last reading, marked stale")
+
+        // 窗口已经重置：上一个窗口的数不能冒充，写「—」
+        staleCodex5h.codex.r5 = Int(Date().timeIntervalSince1970) - 60
+        let reset = MenuBarQuotaSource.metrics(in: staleCodex5h)
+            .first { $0.kind.displayName == "Codex 5h" }
+        try expect(reset?.value == "—" && reset?.remaining == nil && reset?.stale == true,
+                   "a window that reset since the reading shows a dash")
     }
 
     private static func checkRenderable() throws {
@@ -148,12 +160,12 @@ struct MenuBarQuotaSourceCheck {
 
         let usage = try decodeFixture(fixtureJSON)
 
-        // 过期的窗口画不出数字。设置页的提示语和预览走这个谓词，
+        // 过期的窗口照常占位。设置页的提示语和预览走这个谓词，
         // 必须和 metrics(in:) 完全一致，否则又会宣布状态栏没画的组合。
         var staleFable = usage
         staleFable.claude.qf_stale = true
-        try expect(!MenuBarQuotaSource.claudeFable.isRenderable(in: staleFable),
-                   "a stale window cannot render a number")
+        try expect(MenuBarQuotaSource.claudeFable.isRenderable(in: staleFable),
+                   "a stale window keeps its place in the menu bar")
         for source in MenuBarQuotaSource.allCases {
             let rendered = MenuBarQuotaSource.metrics(in: staleFable)
                 .contains { $0.kind == .quota(source) }
@@ -194,7 +206,7 @@ struct MenuBarQuotaSourceCheck {
         let names = MenuBarQuotaSource.metrics(in: usage).map(\.kind.displayName)
         try expect(!names.contains { $0.hasPrefix("Claude") },
                    "showClaude=false must hide every claude window: \(names)")
-        try expect(names == ["Codex 5h", "Codex 周", "Grok", "Kimi 周"],
+        try expect(names == ["Codex 5h", "Codex 周", "Kimi 5h", "Kimi 订阅", "Grok", "Kimi 周"],
                    "non-claude windows must be unaffected: \(names)")
     }
 
@@ -215,6 +227,13 @@ struct MenuBarQuotaSourceCheck {
 
         let icon = MenuBarTitleRenderer.metricsForDisplay(metrics, density: .icon)
         try expect(icon.map(\.value) == ["12"], "icon density must track the lowest metric")
+
+        // 单额度先在新鲜读数里挑：过期的旧数字再低也不抢位置
+        var withStale = metrics
+        withStale[2].stale = true
+        let freshFirst = MenuBarTitleRenderer.metricsForDisplay(withStale, density: .lowest)
+        try expect(freshFirst.map(\.value) == ["60"],
+                   "lowest prefers fresh readings over a stale one: \(freshFirst.map(\.value))")
     }
 
     /// 同家族的两个窗口同色，只能靠符号区分——这里就是在守那个符号。
@@ -285,7 +304,7 @@ struct MenuBarQuotaSourceCheck {
         }
     }
 
-    /// 一个把七个窗口都发全了的账号：Claude q5/q7/qf、Codex p5/pw、Grok pct、Kimi 周，用量互不相同便于定位串线。
+    /// 一个把所有窗口都发全了的账号：Claude q5/q7/qf、Codex p5/pw、Kimi p5/pw/周、Grok pct，用量互不相同便于定位串线。
     private static let fixtureJSON = """
     {
       "claude": {
@@ -347,7 +366,10 @@ struct MenuBarQuotaSourceCheck {
           "year": {"hit": 0, "in": 0, "out": 0, "cr": 0, "cw": 0, "reason": 0, "cost": 0, "sessions": 0, "models": []}
         },
         "weekly": {"used": 45, "limit": 100, "duration": 1, "unit": "week", "reset_at": 2000000000},
-        "limits": []
+        "limits": [],
+        "p5": 15,
+        "pw": 55,
+        "plan": "LEVEL_INTERMEDIATE"
       },
       "hermes": {
         "ranges": {
