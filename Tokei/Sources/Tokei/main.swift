@@ -280,7 +280,15 @@ final class Store: ObservableObject {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let store = Store()
     let panelLayout = PanelLayoutContext()
-    var statusItem: NSStatusItem!
+    private lazy var statusItemController = StatusItemController(
+        target: self, action: #selector(handleStatusItemClick(_:)),
+        canRebuild: { [weak self] in !(self?.popover.isShown ?? false) },
+        didRebuild: { [weak self] in
+            self?.popoverAnchorButton = nil
+            self?.updateStatusTitle()
+        }
+    )
+    var statusItem: NSStatusItem! { statusItemController.item }
     var popover = NSPopover()
     /// 每次右键现建，跟随当前界面语言。
     var statusMenu: NSMenu {
@@ -309,16 +317,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     static let kimicodeColor = kimiColor
 
     func applicationDidFinishLaunching(_ note: Notification) {
-        // macOS 26 上用可变宽度初始化时，状态栏项偶发在按钮拿到标题、图标之前就被压没，
-        // 进程在跑、菜单栏却看不到图标（issue #8，用户在 26.5 上复现并验证了这套处理）。
-        // 先按正方形占位并显式设为可见；拿到内容后 fitStatusItemWidth 再按内容定宽。
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.isVisible = true
-        if let b = statusItem.button {
-            b.action = #selector(handleStatusItemClick(_:))
-            b.target = self
-            b.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        }
         updateStatusTitle()
         DispatchQueue.main.async { [weak self] in
             self?.statusItem?.isVisible = true
@@ -524,22 +522,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func fitStatusItemWidth(_ button: NSStatusBarButton) {
         button.invalidateIntrinsicContentSize()
         let compactWidth = ceil(button.intrinsicContentSize.width) + 4
-        statusItem.length = max(NSStatusBar.system.thickness, compactWidth)
+        let width = max(NSStatusBar.system.thickness, compactWidth)
+        if statusItem.length != width { statusItem.length = width }
         // 菜单栏图标是唯一入口，每次定宽都确认一次可见（issue #8）。
         statusItem.isVisible = true
     }
 
     /// 已经在运行时，再从访达、启动台或 Spotlight 打开 Tokei 就直接唤出面板。
-    /// 菜单栏图标被挤掉或系统没显示出来时（issue #8），这是唯一还能进来的入口。
+    /// 菜单栏入口失效时先重新注册，避免只能退出并重启整个应用。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        statusItem?.isVisible = true
+        statusItemController.recoverOnReopen()
         DispatchQueue.main.async { [weak self] in
-            guard let self, !self.popover.isShown,
-                  let button = self.statusItem?.button, button.window != nil else { return }
-            self.popoverAnchorButton = button
-            self.togglePopover(anchorButton: button)
+            self?.showPanelAfterReopen(attemptsRemaining: 10)
         }
         return false
+    }
+
+    /// macOS 26 异步连接新入口的窗口，等锚点就绪再展示，最多等待两秒。
+    private func showPanelAfterReopen(attemptsRemaining: Int) {
+        guard !popover.isShown else { return }
+        guard let button = statusItem?.button, button.window != nil,
+              button.bounds.width > 0 else {
+            guard attemptsRemaining > 0 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.showPanelAfterReopen(attemptsRemaining: attemptsRemaining - 1)
+            }
+            return
+        }
+        popoverAnchorButton = button
+        togglePopover(anchorButton: button)
     }
 
     func autoFetchPricing() {
@@ -641,6 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         store.popoverVisible = false
+        statusItemController.resumeRecovery()
     }
 }
 

@@ -65,9 +65,12 @@ class PopoverPlacementTests(unittest.TestCase):
     def test_status_item_stays_visible_and_reopening_the_app_shows_the_panel(self):
         """macOS 26 上可变宽度初始化的状态栏项偶发被压没，进程在跑、图标却看不到（issue #8）。"""
         app_source = (ROOT / "Tokei/Sources/Tokei/main.swift").read_text()
-        self.assertIn("statusItem(withLength: NSStatusItem.squareLength)", app_source)
-        self.assertNotIn("statusItem(withLength: NSStatusItem.variableLength)", app_source)
-        self.assertGreaterEqual(app_source.count("isVisible = true"), 3, "启动、下一轮、每次定宽都确认可见")
+        controller = (ROOT / "Tokei/Sources/Tokei/StatusItemController.swift").read_text()
+        self.assertIn("statusItem(withLength: NSStatusItem.squareLength)", controller)
+        self.assertNotIn("statusItem(withLength: NSStatusItem.variableLength)", controller)
+        self.assertIn("statusItemController.recoverOnReopen()", app_source)
+        self.assertIn("statusItemController.resumeRecovery()", app_source)
+        self.assertIn("self?.updateStatusTitle()", app_source)
         # squareLength 是占位常量不是宽度，定宽的下限仍用菜单栏厚度
         self.assertIn("max(NSStatusBar.system.thickness, compactWidth)", app_source)
         self.assertIn("func applicationShouldHandleReopen", app_source)

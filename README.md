@@ -129,6 +129,8 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 3. 首次打开如被 macOS 拦截，在终端运行：`sudo xattr -rd com.apple.quarantine /Applications/Tokei.app`
 4. 打开 Tokei 即可
 
+系统或显示器唤醒、显示器配置变化后，Tokei 会延迟重新注册菜单栏入口；面板正在使用时会等关闭后再处理。若菜单栏入口仍未出现，可从访达或 Spotlight 再次打开 Tokei，重新注册入口并打开面板，无需退出应用。
+
 <details>
 <summary>从源码构建</summary>
 
@@ -256,6 +258,13 @@ chmod +x ~/.tokei/tokei-sync.sh
 ## 更新日志
 
 ### Unreleased
+
+### v1.0.46
+
+- fix: 系统或显示器唤醒、显示器配置变化后重新注册菜单栏入口，连续通知合并处理
+- fix: 重新打开 Tokei 时恢复菜单栏入口，并等待窗口锚点就绪后打开面板
+- fix: 面板正在使用时延后重建，保留当前操作；常规刷新仅在宽度变化时调整菜单栏占位
+- test: 增加菜单栏重建、通知合并、弹窗锚点保护和恢复任务取消的回归验证
 
 ### v1.0.45
 
