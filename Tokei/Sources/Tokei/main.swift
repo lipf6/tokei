@@ -299,10 +299,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         return menu
     }
     var timer: Timer?
-    /// 面板关着时按 30 秒刷；开着时用户正盯着看，30 秒的空窗会让人以为统计坏了，
-    /// 所以加密到 10 秒。关上就退回去，免得白白每 10 秒拉起一次 Python。
-    static let idleRefreshInterval: TimeInterval = 30
-    static let visibleRefreshInterval: TimeInterval = 10
+    /// 面板开着 30 秒刷一次，关着 60 秒；另有按上次耗时 ×2 的退避，扫得慢会自动拉长。
+    static let idleRefreshInterval: TimeInterval = 60
+    static let visibleRefreshInterval: TimeInterval = 30
     var globalMouseMonitor: Any?
     weak var popoverAnchorButton: NSStatusBarButton?
 
