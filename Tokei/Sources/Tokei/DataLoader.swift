@@ -97,10 +97,6 @@ final class DataLoader {
             .appendingPathComponent(".tokei/claude_quota_swift_cache.json")
     }
 
-    private static var claudeCLIQuotaEnabled: Bool {
-        UserDefaults.standard.object(forKey: "claudeCLIQuotaEnabled") as? Bool ?? false
-    }
-
     private static func claudeCacheRecords() -> [ClaudeCacheRecord] {
         let cacheDir: URL
         if let configured = ProcessInfo.processInfo.environment["TOKEI_CLAUDE_CACHE_DIR"],
@@ -261,7 +257,7 @@ final class DataLoader {
             }
         }
 
-        let desktopQuota = finishClaudeQuotaScan(
+        return finishClaudeQuotaScan(
             records: records,
             original: original,
             state: &state,
@@ -271,21 +267,6 @@ final class DataLoader {
             initialScan: initialScan,
             nowEpoch: nowEpoch
         )
-        guard claudeCLIQuotaEnabled,
-              !hasFreshClaudeCoreQuota(desktopQuota),
-              let cliQuota = ClaudeCLIQuotaBridge.fetchQuota(now: now) else {
-            return desktopQuota
-        }
-        guard let desktopQuota else { return cliQuota }
-        let desktopUpdated = intValue(desktopQuota["q_updated"]) ?? 0
-        let cliUpdated = intValue(cliQuota["q_updated"]) ?? 0
-        return cliUpdated >= desktopUpdated ? cliQuota : desktopQuota
-    }
-
-    private static func hasFreshClaudeCoreQuota(_ quota: [String: Any]?) -> Bool {
-        guard let quota else { return false }
-        return numberValue(quota["q5"]) != nil && quota["q5_stale"] as? Bool != true &&
-            numberValue(quota["q7"]) != nil && quota["q7_stale"] as? Bool != true
     }
 
     private static func finishClaudeQuotaScan(

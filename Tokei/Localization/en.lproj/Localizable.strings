@@ -59,9 +59,7 @@
 "5小时额度" = "5-hour quota";
 "<未配置 git remote>" = "<no git remote configured>";
 "API 价" = "API price";
-"Claude Code CLI 额度查询" = "Claude Code CLI quota lookup";
 "Claude Code 或 Claude 桌面端下次读到额度时自动刷新" = "Refreshes automatically the next time Claude Code or the Claude desktop app reads the quota";
-"Claude Code 还没有周额度卡片：可打开 Claude Desktop 的 Usage 页面，" = "No Claude Code weekly quota card yet: open the Usage page in Claude Desktop,";
 "Claude Code 额度缓存" = "Claude Code quota cache";
 "Claude 周" = "Claude weekly";
 "Claude/GPT 周" = "Claude/GPT weekly";
@@ -121,7 +119,6 @@
 "主页" = "Home";
 "主项目占 %@%%" = "Main project %@%%";
 "久坐提醒" = "Break reminder";
-"仅使用 CLI 时，可在「隐私与额度」开启 Claude Code CLI 额度查询。" = "If you only use the CLI, enable Claude Code CLI quota lookup under “Privacy & Quota”.";
 "仅允许了本次读取，请重新授权并选择“始终允许”" = "Only one-time read access was granted; please re-authorize and choose “Always Allow”";
 "仅图标" = "Icon only";
 "今天" = "Today";
@@ -309,7 +306,6 @@
 "总额度" = "Total quota";
 "成就" = "Achievements";
 "成本按 API 价估算,非订阅实付" = "Cost estimated at API prices, not actual subscription spend";
-"或在设置的「隐私与额度」开启 Claude Code CLI 额度查询。" = "Or enable Claude Code CLI quota lookup in Settings → “Privacy & Quota”.";
 "所有模型已匹配 ✓" = "All models matched ✓";
 "所有订阅的额度重置时间都拿不到，定位不了周期" = "Cannot get reset times for any subscription, so cycles cannot be located";
 "打开设置" = "Open Settings";
@@ -442,7 +438,6 @@
 "用量结构" = "Usage breakdown";
 "用量统计不受影响；检测到订阅周期后会自动展示。" = "Usage stats unaffected; shown automatically once a subscription cycle is detected.";
 "用量统计不受影响；登录 Kimi Code 后会自动展示官方额度。" = "Usage stats unaffected; official quota appears automatically after signing in to Kimi Code.";
-"用量统计不受影响；登录态或网络恢复后会自动重试。" = "Usage stats unaffected; retries automatically once login or network recovers.";
 "界面" = "Appearance";
 "登录时启动" = "Launch at login";
 "百亿先生" = "10B Club";
@@ -568,7 +563,6 @@
 "额度轨迹" = "Quota History";
 "首字" = "First letter";
 "高峰 %@" = "Peak %@";
-"默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。" = "Off by default. When on, only if Claude Desktop cache is unavailable, Tokei uses Claude Code CLI's existing login session to query Anthropic for 5h, weekly and model quotas, cached for 5 min. Login tokens stay in memory and are never written to Tokei files.";
 "默认关闭。开启后，Tokei 仅连接千问办公桌面端在本机 127.0.0.1 提供的受保护接口；千问办公可能随之向官方服务刷新额度。Tokei 不读取或保存登录凭据，需保持千问办公已登录并运行。" = "Off by default. When on, Tokei only connects to the guarded endpoint the QwenWork desktop app exposes on local 127.0.0.1; QwenWork may refresh quota from official services as a result. Tokei never reads or stores login credentials; keep QwenWork signed in and running.";
 "默认只读 ~/.grok 本地日志，不访问网络" = "By default only reads local ~/.grok logs, no network access";
 "默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。" = "By default only reads quota snapshots from local Grok logs, no network access. When enabled, requests the Grok billing API with local credentials for the latest remaining quota.";
@@ -582,3 +576,5 @@
 "复用 Kimi Code 本地登录态查询官方周额度和 5 小时额度；Token 临近过期时会按官方协议自动续期。额度缓存不保存 Token。" = "Reuses the local Kimi Code login to query official weekly and 5-hour quotas; tokens are renewed via the official OAuth flow before expiry. The quota cache never stores tokens.";
 "来自 Kimi Code 官方 /usages 接口；所有设备共享同一额度池" = "From the official Kimi Code /usages API; all devices share one quota pool";
 "请先在 Kimi Code 完成登录" = "Sign in to Kimi Code first";
+"用量统计不受影响；打开 Claude Desktop 的 Usage 页面即可读到额度。" = "Usage stats are unaffected; open the Usage page in Claude Desktop to fetch the quota.";
+"Claude Code 还没有周额度卡片：打开 Claude Desktop 的 Usage 页面即可读到额度。" = "Claude Code has no weekly quota card yet: open the Usage page in Claude Desktop to fetch the quota.";

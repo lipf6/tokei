@@ -96,8 +96,6 @@ struct PanelView: View {
     @AppStorage("grokBotQuotaEnabled") private var grokBotQuotaEnabled = false
     /// 默认关闭：开启后仅查询千问办公桌面端暴露在本机回环地址上的额度接口。
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
-    /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
-    @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
     @AppStorage(ActivityReporter.enabledKey) private var activityStatisticsEnabled = true
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
     /// 只有历史上就默认开的 Claude 5h 与 Codex 周保持默认开，其余窗口默认关，避免抢占状态栏。
@@ -660,9 +658,7 @@ struct PanelView: View {
                 thinDivider
                 quotaStateNotice(
                     title: L("暂未获取到额度数据"),
-                    detail: claudeCLIQuotaEnabled
-                        ? L("用量统计不受影响；登录态或网络恢复后会自动重试。")
-                        : L("仅使用 CLI 时，可在「隐私与额度」开启 Claude Code CLI 额度查询。"),
+                    detail: L("用量统计不受影响；打开 Claude Desktop 的 Usage 页面即可读到额度。"),
                     source: L("Claude Code 额度缓存"),
                     updated: c.q_updated,
                     tint: Theme.claude
@@ -3415,14 +3411,6 @@ struct PanelView: View {
 
             thinDivider
 
-            settingsToggleRow(L("Claude Code CLI 额度查询"), isOn: $claudeCLIQuotaEnabled)
-            Text(L("默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。"))
-                .font(.system(size: Theme.fontSize(8.5)))
-                .foregroundStyle(Theme.tTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            thinDivider
-
             settingsToggleRow(L("Kimi 实时额度查询"), isOn: $kimiLiveQuotaEnabled)
             Text(L("复用 Kimi Code 本地登录态查询官方周额度和 5 小时额度；Token 临近过期时会按官方协议自动续期。额度缓存不保存 Token。"))
                 .font(.system(size: Theme.fontSize(8.5)))
@@ -3473,9 +3461,6 @@ struct PanelView: View {
         }
         .onChange(of: activityStatisticsEnabled) { _ in
             ActivityReporter.shared.preferencesChanged()
-        }
-        .onChange(of: claudeCLIQuotaEnabled) { _ in
-            store.refresh()
         }
         .onChange(of: grokLiveQuotaEnabled) { enabled in
             Self.setGrokLiveQuotaEnabled(enabled)

@@ -42,9 +42,7 @@
 "5h 剩余" = "5 h restantes";
 "<未配置 git remote>" = "<aucun remote git configuré>";
 "API 价" = "Tarif API";
-"Claude Code CLI 额度查询" = "Consultation du quota Claude Code CLI";
 "Claude Code 或 Claude 桌面端下次读到额度时自动刷新" = "Se met à jour automatiquement la prochaine fois que Claude Code ou l'app Claude lit le quota";
-"Claude Code 还没有周额度卡片：可打开 Claude Desktop 的 Usage 页面，" = "Aucune carte de quota hebdomadaire Claude Code : ouvrez la page Usage dans Claude Desktop,";
 "Claude Code 额度缓存" = "Cache du quota Claude Code";
 "Claude 周" = "Claude hebdo";
 "Codex 周" = "Codex hebdo";
@@ -90,7 +88,6 @@
 "个人积分明细" = "Détails des crédits personnels";
 "主页" = "Accueil";
 "久坐提醒" = "Rappel de pause";
-"仅使用 CLI 时，可在「隐私与额度」开启 Claude Code CLI 额度查询。" = "Si vous n'utilisez que le CLI, activez la consultation du quota Claude Code CLI sous « Confidentialité et quotas ».";
 "仅允许了本次读取，请重新授权并选择“始终允许”" = "Seul un accès temporaire a été accordé ; veuillez réautoriser en choisissant « Toujours autoriser »";
 "仅图标" = "Icône uniquement";
 "今天" = "Aujourd'hui";
@@ -249,7 +246,6 @@
 "总成本" = "Coût total";
 "成就" = "Succès";
 "成本按 API 价估算,非订阅实付" = "Coût estimé aux tarifs API, non lié aux dépenses réelles d'abonnement";
-"或在设置的「隐私与额度」开启 Claude Code CLI 额度查询。" = "Ou activez la consultation du quota Claude Code CLI dans Réglages → « Confidentialité et quotas ».";
 "所有模型已匹配 ✓" = "Tous les modèles associés ✓";
 "所有订阅的额度重置时间都拿不到，定位不了周期" = "Impossible d'obtenir les heures de réinitialisation pour les abonnements, cycles introuvables";
 "打开设置" = "Ouvrir les Réglages";
@@ -370,7 +366,6 @@
 "用量结构" = "Structure d'utilisation";
 "用量统计不受影响；检测到订阅周期后会自动展示。" = "Statistiques non affectées ; affiché automatiquement dès la détection d'un cycle.";
 "用量统计不受影响；登录 Kimi Code 后会自动展示官方额度。" = "Statistiques non affectées ; le quota officiel s'affichera après connexion à Kimi Code.";
-"用量统计不受影响；登录态或网络恢复后会自动重试。" = "Statistiques non affectées ; nouvelle tentative automatique dès retour de la connexion.";
 "界面" = "Apparence";
 "登录时启动" = "Lancer à l'ouverture de session";
 "目录" = "Répertoire";
@@ -481,7 +476,6 @@
 "额度窗口" = "Fenêtre de quota";
 "额度轨迹" = "Historique des quotas";
 "首字" = "Première lettre";
-"默认关闭。开启后仅在 Claude Desktop 缓存不可用时，使用 Claude Code CLI 已有登录态向 Anthropic 查询 5h、周及模型额度，并缓存 5 分钟。登录 Token 只在内存中使用，不写入 Tokei 文件。" = "Désactivé par défaut. Si activé, seulement si le cache Claude Desktop est indisponible, Tokei utilise la session Claude Code CLI pour interroger Anthropic pour 5h, hebdo et modèles (en cache 5 min). Les identifiants restent en mémoire.";
 "默认关闭。开启后，Tokei 仅连接千问办公桌面端在本机 127.0.0.1 提供的受保护接口；千问办公可能随之向官方服务刷新额度。Tokei 不读取或保存登录凭据，需保持千问办公已登录并运行。" = "Désactivé par défaut. Si activé, Tokei se connecte uniquement au point d'accès local 127.0.0.1 de l'app QwenWork. Tokei ne stocke aucun identifiant.";
 "默认只读 ~/.grok 本地日志，不访问网络" = "Par défaut, lit uniquement les journaux locaux ~/.grok, aucun accès réseau";
 "默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。" = "Par défaut, lit uniquement les instantanés des journaux locaux Grok, sans accès réseau. Si activé, interroge l'API de facturation Grok avec les identifiants locaux.";
