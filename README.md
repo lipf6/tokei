@@ -259,6 +259,11 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.47
+
+- feat: Claude 额度只读 Claude Desktop 本地缓存，移除 Claude Code CLI 额度查询接口与设置开关，不再向 Anthropic 发起请求
+- perf: 面板自动刷新放宽为打开 30 秒、关闭 60 秒，保留按上次耗时退避
+
 ### v1.0.46
 
 - fix: 系统或显示器唤醒、显示器配置变化后重新注册菜单栏入口，连续通知合并处理
