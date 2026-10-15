@@ -37,7 +37,7 @@ export function cycleTint(tool: string): RGB {
 function missingHint(tool: string): string {
   switch (tool) {
     case "claude":
-      return L("Claude Code 还没有周额度卡片：可打开 Claude Desktop 的 Usage 页面，") + L("或在设置的「隐私与额度」开启 Claude Code CLI 额度查询。");
+      return L("Claude Code 还没有周额度卡片：打开 Claude Desktop 的 Usage 页面即可读到额度。");
     case "grok":
       return L("Grok 还没有周额度卡片：登录一次 grok.com 让 Tokei 抓到额度读数。");
     default:

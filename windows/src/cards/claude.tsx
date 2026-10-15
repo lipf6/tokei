@@ -75,7 +75,6 @@ function ClaudeCard({ ctx }: { ctx: CardContext }) {
         hasBreakdown: true,
       };
     });
-  const cliQuota = ctx.pref("claudeCLIQuotaEnabled", false);
   return (
     <VStack>
       <CardHead title="Claude Code" tint={Theme.claude} sessions={sessions} />
@@ -126,11 +125,7 @@ function ClaudeCard({ ctx }: { ctx: CardContext }) {
             <ThinDivider />
             <QuotaStateNotice
               title={L("暂未获取到额度数据")}
-              detail={
-                cliQuota
-                  ? L("用量统计不受影响；登录态或网络恢复后会自动重试。")
-                  : L("仅使用 CLI 时，可在「隐私与额度」开启 Claude Code CLI 额度查询。")
-              }
+              detail={L("用量统计不受影响；打开 Claude Desktop 的 Usage 页面即可读到额度。")}
               source={L("Claude Code 额度缓存")}
               updated={c.q_updated}
               tint={Theme.claude}

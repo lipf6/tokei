@@ -84,6 +84,7 @@
 "Kimi Code 本地登录态" = "Kimi Code local login session";
 "Kimi Code 的登录态有效期很短，Tokei 复用本机登录态并按官方协议自动续期；续期失败或接口暂不可用时，显示最近一次缓存读数。" = "Kimi Code login sessions are short-lived. Tokei reuses the local login and renews it via the official OAuth flow; if renewal fails or the API is unavailable, the most recent cached reading is shown.";
 "Kimi 订阅" = "Kimi subscription";
+"Kimi Code 的登录态很快到期,过期后 Tokei 不再查询官方额度,也不会代它刷新。在 Kimi Code 里发一条消息即可让它自行刷新,额度随后恢复更新。" = "Kimi Code's login session is expiring soon. After expiry Tokei stops querying official quota and will not refresh it on its behalf. Sending one message in Kimi Code lets it refresh itself, and quota updates resume.";
 "Kimi 周" = "Kimi weekly";
 "Loop滴神" = "Loop Legend";
 "Provider 额度" = "Provider Quota";
