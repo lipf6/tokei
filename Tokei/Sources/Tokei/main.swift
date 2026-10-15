@@ -123,7 +123,6 @@ final class Store: ObservableObject {
             self.lastRefreshDuration = Date().timeIntervalSince(startedAt)
             self.retryCount = 0
             self.loadError = nil
-            self.recordQuotaHistory(local)
             self.localUsage = local
             var allDevices = local
             if self.syncEnabled {
@@ -144,6 +143,7 @@ final class Store: ObservableObject {
                 self.peerLoadIssues = []
             }
             self.allDevicesUsage = allDevices
+            self.recordQuotaHistory(local, claudeQuotaSource: allDevices)
             self.applyDisplayMode(updateStatusTitle: false)
             let f = DateFormatter(); f.dateFormat = "HH:mm:ss"
             self.lastUpdated = L("更新 %@", f.string(from: Date()))
@@ -176,7 +176,9 @@ final class Store: ObservableObject {
         }
     }
 
-    private func recordQuotaHistory(_ usage: Usage) {
+    /// Codex 额度和模型 token 统计只用本机；Claude 额度本机读不到时，由其他设备合并进来，
+    /// 所以三个 Claude 额度取合并后的值（没开同步或没有 peer 时，两者相同）。
+    private func recordQuotaHistory(_ usage: Usage, claudeQuotaSource: Usage) {
         let claudeRange = usage.claude.ranges.get(.today)
         let codexRange = usage.codex.ranges.get(.today)
         let claudeModels = claudeRange.models.reduce(into: [String: Int]()) { totals, model in
@@ -197,12 +199,12 @@ final class Store: ObservableObject {
             $0.duration == 5 && $0.unit == "hour"
         }
         quotaHistory.record(QuotaCapture(
-            claudeFiveHourRemaining: usage.claude.q5_stale == true
-                ? nil : usage.claude.q5.map { 100 - $0 },
-            claudeWeekRemaining: usage.claude.q7_stale == true
-                ? nil : usage.claude.q7.map { 100 - $0 },
-            claudeFableWeekRemaining: usage.claude.qf_stale == true
-                ? nil : usage.claude.qf.map { 100 - $0 },
+            claudeFiveHourRemaining: claudeQuotaSource.claude.q5_stale == true
+                ? nil : claudeQuotaSource.claude.q5.map { 100 - $0 },
+            claudeWeekRemaining: claudeQuotaSource.claude.q7_stale == true
+                ? nil : claudeQuotaSource.claude.q7.map { 100 - $0 },
+            claudeFableWeekRemaining: claudeQuotaSource.claude.qf_stale == true
+                ? nil : claudeQuotaSource.claude.qf.map { 100 - $0 },
             codexWeekRemaining: usage.codex.pw_stale == true
                 ? nil : usage.codex.pw.map { 100 - $0 },
             kimiFiveHourRemaining: usage.kimicode.q_stale == true
@@ -304,6 +306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     static let visibleRefreshInterval: TimeInterval = 30
     var globalMouseMonitor: Any?
     weak var popoverAnchorButton: NSStatusBarButton?
+    private var anchorWindowObservers: [NSObjectProtocol] = []
 
     // 菜单栏额度颜色（与面板对应 Theme 一致）。
     static let claudeColor = NSColor(
@@ -527,6 +530,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem.isVisible = true
     }
 
+    /// 面板开着时菜单栏按钮变宽变窄（在设置里切到「仅图标」、额度数字位数变了），状态栏
+    /// 窗口会挪到新位置，弹窗却还挂在打开时的位置，箭头就指到了旁边的图标上。
+    ///
+    /// 等窗口挪完再把定位矩形换成按钮的新范围：不重新 show、不改尺寸——那两样会让
+    /// NSPopover 重挑屏幕和锚点，外接显示器的全屏 Space 下会把面板甩到别处（issue #97）。
+    /// 实测在改宽度的同一轮里设置没用，状态栏窗口要晚一拍才挪，所以跟着它的 didMove 走。
+    private func followAnchorWindow(of button: NSStatusBarButton) {
+        anchorWindowObservers.forEach(NotificationCenter.default.removeObserver)
+        anchorWindowObservers = []
+        guard let window = button.window else { return }
+        anchorWindowObservers = [NSWindow.didMoveNotification, NSWindow.didResizeNotification].map { name in
+            NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) {
+                [weak self, weak button] _ in
+                guard let self, let button, self.popover.isShown else { return }
+                self.popover.positioningRect = button.bounds
+            }
+        }
+    }
+
     /// 已经在运行时，再从访达、启动台或 Spotlight 打开 Tokei 就直接唤出面板。
     /// 菜单栏入口失效时先重新注册，避免只能退出并重启整个应用。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -602,6 +624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             popover.contentSize = panelLayout.contentSize
             popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+            followAnchorWindow(of: b)
         }
     }
 
@@ -615,11 +638,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         updatePanelLayout(for: button)
         popover.contentSize = panelLayout.contentSize
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        followAnchorWindow(of: button)
     }
 
     private func updatePanelLayout(for button: NSStatusBarButton) {
+        let ceiling = PanelPlacement.maximumHeight(
+            anchorVisibleFrame: button.window?.screen?.visibleFrame,
+            fallbackVisibleFrame: NSScreen.screens.first?.visibleFrame)
         panelLayout.update(
-            fitting: measuredPanelSize(),
+            fitting: measuredPanelSize(ceiling: ceiling),
             anchorVisibleFrame: button.window?.screen?.visibleFrame,
             fallbackVisibleFrame: NSScreen.screens.first?.visibleFrame
         )
@@ -632,17 +659,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// 直接问正在显示的 host 是问不出来的：它被固定画布钉死，只会回答画布的尺寸。
     ///
     /// 只在打开之前调用，开着的时候绝不重量——见 `PanelPlacement.contentSize`。
-    private func measuredPanelSize() -> CGSize {
+    private func measuredPanelSize(ceiling: CGFloat) -> CGSize {
         // 按面板当前停留的页面量：关掉时停在设置页，重开时也得按设置页的宽度来（issue #105）。
         let previous = PanelView.initialMode
+        let previousRange = PanelView.initialRange
         PanelView.initialMode = PanelView.PanelMode(rawValue: panelLayout.page) ?? .cards
-        defer { PanelView.initialMode = previous }
-        let probe = NSHostingController(
-            rootView: PanelView(store: store, layout: panelLayout, scrollable: false))
-        probe.view.layoutSubtreeIfNeeded()
-        let size = probe.sizeThatFits(in: CGSize(width: CGFloat.greatestFiniteMagnitude,
-                                                 height: CGFloat.greatestFiniteMagnitude))
-        return size.width > 0 && size.height > 0 ? size : .zero
+        defer {
+            PanelView.initialMode = previous
+            PanelView.initialRange = previousRange
+        }
+        // 首页高度随页签变：「今日」卡片少、「本年」卡片多，而面板开着时切页签不改尺寸
+        // （issue #97）。只按「今日」量，切到长的页签就只能在矮面板里滚。所以挨个页签量、
+        // 取最高的；顶到屏幕比例上限就不再量（通常「本年」一次就够）。
+        let ranges: [RangeKey] = PanelView.initialMode == .cards
+            ? [.year, .month, .week, .lastWeek, .yesterday, .today] : [.today]
+        var best = CGSize.zero
+        for range in ranges {
+            PanelView.initialRange = range
+            let probe = NSHostingController(
+                rootView: PanelView(store: store, layout: panelLayout, scrollable: false))
+            probe.view.layoutSubtreeIfNeeded()
+            let size = probe.sizeThatFits(in: CGSize(width: CGFloat.greatestFiniteMagnitude,
+                                                     height: CGFloat.greatestFiniteMagnitude))
+            guard size.width > 0 && size.height > 0 else { continue }
+            best = CGSize(width: max(best.width, size.width), height: max(best.height, size.height))
+            if best.height >= ceiling { break }
+        }
+        return best
     }
 
     func popoverDidShow(_ notification: Notification) {
@@ -666,7 +709,7 @@ enum Shot {
            CommandLine.arguments.count > idx + 1 {
             let url = URL(fileURLWithPath: CommandLine.arguments[idx + 1])
             do {
-                usage = try JSONDecoder().decode(Usage.self, from: Data(contentsOf: url))
+                usage = try Usage.decode(from: Data(contentsOf: url))
             } catch {
                 fputs("Tokei --usage: \(error)\n", stderr)
             }

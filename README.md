@@ -308,6 +308,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 - feat: 带回 Kimi Code 官方额度查询，支持周额度、5 小时额度、Extra Usage 与 OAuth 自动续期
 - fix: 修复无用量周期 Kimi Code 卡片额度提示异常
 - privacy: 外部 Provider 默认关闭，API Key 存入 macOS Keychain，账号额度不进入 Git 同步快照
+- feat(sync): 多设备同步时采用其他设备的 Claude 额度（本机读不到时用 peer 的，两边都有取更新的一份，按当前时间重算过期标记）
 
 ### v1.0.19
 
