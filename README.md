@@ -259,6 +259,12 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.48
+
+- feat: 合并上游 v1.0.46，卡片新增平均输出速度与 TTFT（首字延迟）中位数，修复启动即崩溃、采集器写盘从十几 MB 降到 1 MB 以内
+- feat: 多设备同步可采用其他设备的 Claude 额度；Codex 重置卡按本地时区显示并带倒计时；模型归因按真正作答的模型合并
+- chore: Claude 保持只读本地缓存口径，刷新间隔维持 30/60 秒
+
 ### v1.0.47
 
 - feat: Claude 额度只读 Claude Desktop 本地缓存，移除 Claude Code CLI 额度查询接口与设置开关，不再向 Anthropic 发起请求
