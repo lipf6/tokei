@@ -259,6 +259,13 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.50
+
+- feat: 吸收上游截至 v1.0.51 的 macOS 与采集器更新，支持 Codex 压缩历史日志和 OpenClaw 压缩事件，补齐 GitHub Copilot 本地输出及费用同步
+- feat: 模型价格后台自动核对，保留自定义价格；额度卡增加本周期估算费用与月额度展示
+- fix: Grok Bot 后台读取不再触发授权弹窗，升级保留已有助手与授权；登录项命令避免管道阻塞
+- fix: 优化菜单栏弹窗锚点、单工具布局和样式预览，保留唤醒后菜单栏恢复、30/60 秒刷新、Claude 本地缓存与 Kimi OAuth 自动续期
+
 ### v1.0.49
 
 - feat: 合入上游 v1.0.47 的 macOS 部分，用量卡片默认按当前时间范围的 Token 总量从高到低排列
