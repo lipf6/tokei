@@ -2164,12 +2164,12 @@ def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None, *, measur
     try:
         out = int(out_tokens or 0)
         gen = float(gen_seconds or 0)
+        ttft = float(ttft_seconds) if ttft_seconds is not None else None
     except (TypeError, ValueError, OverflowError):
         return False
-        ttft = float(ttft_seconds) if ttft_seconds is not None else None
-    if out < _PERF_MIN_OUTPUT or not 0.2 < gen <= _PERF_MAX_SECONDS or out / gen > _PERF_MAX_TPS:
-        return False
     if ttft is not None and (not math.isfinite(ttft) or ttft < 0):
+        return False
+    if out < _PERF_MIN_OUTPUT or not 0.2 < gen <= _PERF_MAX_SECONDS or out / gen > _PERF_MAX_TPS:
         return False
     model = model or "unknown"
     if not _generation_stats(perf.get(model)):
@@ -2191,9 +2191,9 @@ def _perf_merge(dst, src):
         if not _generation_stats(stats):
             continue
         target = dst.setdefault(model, {"o": 0, "g": 0.0, "n": 0})
+        target["generation_only"] = True
         target["o"] += int(stats.get("o", 0) or 0)
         target["g"] = round(target["g"] + float(stats.get("g", 0) or 0), 3)
-        target["generation_only"] = True
         target["n"] += int(stats.get("n", 0) or 0)
         if stats.get("en"):
             target["en"] = int(target.get("en", 0) or 0) + int(stats["en"])
@@ -2282,9 +2282,9 @@ def _perf_summary(perf, name=None):
     overall = one(total.get("*"))
     if not overall:
         return None
+    overall["generation_only"] = True
     overall["models"] = {model: value for model, value in
                          ((model, one(stats)) for model, stats in by_name.items()) if value}
-    overall["generation_only"] = True
     return overall
 
 
