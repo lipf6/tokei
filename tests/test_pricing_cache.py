@@ -331,7 +331,7 @@ class PricingCacheTests(unittest.TestCase):
                 self.assertEqual(list(USAGE._iter_codex_cached_events(path)), events)
                 day = entry["days"]["2026-10-27"]
                 self.assertAlmostEqual(day["cost"], 0.379)
-                for field in ("in", "cached", "out", "reason", "models", "hours", "model_hours", "perf"):
+                for field in ("in", "cached", "out", "reason", "models", "hours", "model_hours", "generation_perf"):
                     if field == "models":
                         for name, model in old_days["2026-10-27"]["models"].items():
                             self.assertEqual({k: v for k, v in day[field][name].items() if k != "cost"},
