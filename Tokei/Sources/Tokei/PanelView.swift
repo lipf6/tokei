@@ -2076,16 +2076,11 @@ struct PanelView: View {
         }
     }
 
-    /// 平均输出速度、TTFT 中位数两格，只在有样本时出现。速度 = 输出 token 总数 ÷ 生成总时长，
-    /// 拿不到首字时间的请求速度含等待（端到端）；TTFT 有长尾，取中位数。
+    /// 各工具按有效请求的生成耗时汇总输出速度。
     func perfMetrics(_ perf: PerfStat?, includeTTFT: Bool = true) -> [Metric] {
-        guard let perf, perf.n > 0 else { return [] }
-        let includesWait = (perf.en ?? 0) > 0
-        let speedLabel = includesWait ? L("平均输出速度（含等待）") : L("平均输出速度")
-        var items: [Metric] = [.init("gauge.medium", speedLabel, Fmt.tps(perf.tps),
-                                     help: includesWait
-                                       ? L("输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度", perf.n, perf.en ?? 0)
-                                       : L("输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算", perf.n))]
+        guard let perf, perf.isGenerationOnly, perf.n > 0 else { return [] }
+        var items: [Metric] = [.init("gauge.medium", L("平均输出速度"), Fmt.tps(perf.tps),
+                                     help: L("有效请求的输出 token 合计 ÷ 首字后的生成总时长"))]
         if includeTTFT, let ttft = perf.ttft {
             items.append(.init("timer", L("TTFT 中位数"), Fmt.seconds(ttft),
                                help: L("首字延迟：从发出请求到收到第一个 token 的时间，%@ 个请求的中位数", perf.tn ?? perf.n)))
@@ -2569,7 +2564,7 @@ struct PanelView: View {
                 }
                 if let perf {
                     HStack(spacing: 2) {
-                        Text((perf.en ?? 0) > 0 ? L("平均速度（含等待）") : L("平均速度")).font(labelFont).foregroundStyle(Theme.tSecondary)
+                        Text(L("平均速度")).font(labelFont).foregroundStyle(Theme.tSecondary)
                         Text(Fmt.tps(perf.tps)).font(tagFont).foregroundStyle(tint)
                         if let ttft = perf.ttft {
                             Text("·").font(tagFont).foregroundStyle(tint.opacity(0.6))
@@ -2580,9 +2575,7 @@ struct PanelView: View {
                     .padding(.horizontal, 6).padding(.vertical, 2.5)
                     .background(Capsule().fill(bg))
                     .overlay(Capsule().strokeBorder(border, lineWidth: 0.5))
-                    .help((perf.en ?? 0) > 0
-                          ? L("输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度", perf.n, perf.en ?? 0)
-                          : perf.ttft == nil
+                    .help(perf.ttft == nil
                             ? L("平均输出速度来自 %@ 个请求", perf.n)
                             : L("平均输出速度来自 %@ 个请求，TTFT 中位数来自其中 %@ 个", perf.n, perf.tn ?? perf.n))
                 }

@@ -259,6 +259,10 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.51
+
+- 修复所有 Agent 的平均输出速度统计，统一使用首字后的生成耗时。缺少可靠计时的请求仍计入用量。
+
 ### v1.0.50
 
 - feat: 吸收上游截至 v1.0.51 的 macOS 与采集器更新，支持 Codex 压缩历史日志和 OpenClaw 压缩事件，补齐 GitHub Copilot 本地输出及费用同步

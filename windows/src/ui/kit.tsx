@@ -1,3 +1,4 @@
+import { isGenerationOnly } from "../lib/types";
 // 卡片里复用的小部件，逐个对应 Mac 版 Design.swift 与 PanelView.swift 里的同名视图。
 import { createContext, useContext, useState, type CSSProperties, type ReactNode } from "react";
 import * as Fmt from "../lib/fmt";
@@ -396,13 +397,13 @@ export function LabeledBadge({ label, value, tint }: { label: string; value: str
 
 /** 平均输出速度、TTFT 中位数两格，只在有样本时出现。 */
 export function perfMetrics(perf: PerfStat | null | undefined, includeTTFT = true): Metric[] {
-  if (!perf || !(perf.n > 0)) return [];
+  if (!isGenerationOnly(perf) || !(perf.n > 0)) return [];
   const items: Metric[] = [
     metric(
       "gauge.medium",
       L("平均输出速度"),
       Fmt.tps(perf.tps),
-      L("输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算", perf.n),
+      L("有效请求的输出 token 合计 ÷ 首字后的生成总时长"),
     ),
   ];
   if (includeTTFT && perf.ttft != null) {

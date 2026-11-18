@@ -44,6 +44,8 @@ final class PerfStat: Codable, Equatable {
     let th: [String: Int]?
     let models: [String: PerfModelStat]?
     let en: Int?
+    var generation_only: Bool? = true
+    var isGenerationOnly: Bool { generation_only == true || (n > 0 && tn == n && (en ?? 0) == 0) }
 
     init(tps: Double, ttft: Double?, n: Int, o: Int? = nil, g: Double? = nil, tn: Int? = nil,
          th: [String: Int]? = nil, models: [String: PerfModelStat]? = nil, en: Int? = nil) {
@@ -53,7 +55,7 @@ final class PerfStat: Codable, Equatable {
     }
 
     static func == (lhs: PerfStat, rhs: PerfStat) -> Bool {
-        lhs.overall == rhs.overall && lhs.models == rhs.models
+        lhs.isGenerationOnly == rhs.isGenerationOnly && lhs.overall == rhs.overall && lhs.models == rhs.models
     }
 
     var overall: PerfModelStat { .init(tps: tps, ttft: ttft, n: n, o: o, g: g, tn: tn, th: th, en: en) }
@@ -61,6 +63,7 @@ final class PerfStat: Codable, Equatable {
     /// 按模型行的显示名找这一行的速度。两边名字出自同一套归并规则，但同一模型的大小写、
     /// 标点写法可能不完全一样（GLM-5.3 / glm 5.3），对不上时只比字母和数字。
     func model(named name: String) -> PerfModelStat? {
+        guard isGenerationOnly else { return nil }
         if let exact = models?[name] { return exact }
         let key = Self.matchKey(name)
         return models?.first { Self.matchKey($0.key) == key }?.value
@@ -73,8 +76,8 @@ final class PerfStat: Codable, Equatable {
 
     /// 跨设备合并：速度 = 输出 token 合计 ÷ 生成秒数合计，TTFT 按合并后的直方图重新取中位数。
     static func merged(_ lhs: PerfStat?, _ rhs: PerfStat?) -> PerfStat? {
-        guard let lhs else { return rhs }
-        guard let rhs else { return lhs }
+        guard let lhs, lhs.isGenerationOnly else { return rhs?.isGenerationOnly == true ? rhs : nil }
+        guard let rhs, rhs.isGenerationOnly else { return lhs }
         let total = lhs.overall.merged(with: rhs.overall)
         var models = lhs.models ?? [:]
         for (name, stat) in rhs.models ?? [:] {
@@ -213,6 +216,8 @@ struct CodexRange: Codable {
     var models: [TokenModelStat] = []
     var perf: PerfStat? = nil
 
+    var generation_only = true
+
     var tokens: Int { `in` + cached + out }
 
     init(hit: Double = 0, `in` input: Int = 0, cached: Int = 0, out: Int = 0,
@@ -237,7 +242,10 @@ struct CodexRange: Codable {
         cost = try c.decodeIfPresent(Double.self, forKey: .cost) ?? 0
         sessions = try c.decodeIfPresent(Int.self, forKey: .sessions) ?? 0
         models = try c.decodeIfPresent([TokenModelStat].self, forKey: .models) ?? []
-        perf = try? c.decodeIfPresent(PerfStat.self, forKey: .perf)
+        // 旧设备的速度汇总可能包含等待，只合并能确认口径的样本。
+        if try c.decodeIfPresent(Bool.self, forKey: .generation_only) == true {
+            perf = try? c.decodeIfPresent(PerfStat.self, forKey: .perf)
+        }
     }
 }
 

@@ -23,7 +23,7 @@ class PerfHelperTests(unittest.TestCase):
     def test_summary_is_token_weighted_and_ttft_is_a_median(self):
         perf = {}
         USAGE._perf_add(perf, "claude-opus-5-5", 100, 1, 2.4)
-        USAGE._perf_add(perf, "claude-opus-5-5", 900, 29)   # 一个拿不到首字时间的慢请求
+        USAGE._perf_add(perf, "claude-opus-5-5", 900, 29, measured_generation=True)   # 只有直接解码计时
         summary = USAGE._perf_summary(perf)
         self.assertEqual(summary["tps"], round(1000 / 30, 1), "按总 token / 总时长，不是平均每个请求的速度")
         self.assertEqual(round(summary["ttft"], 1), 2.4, "一个样本也显示，细分桶插值不出显示精度")
@@ -65,6 +65,16 @@ class PerfHelperTests(unittest.TestCase):
         merged = USAGE._ledger_merge_sources(kept, {"session": live}, "tool")
         self.assertEqual(merged["perf"]["m"]["n"], 1)
         self.assertNotIn("t", merged["perf"]["m"], "旧记录减去现有日志后没有剩下请求，旧分桶不该留下")
+
+    def test_mixed_legacy_aggregate_cannot_contaminate_generation_rates(self):
+        old = {"m": {"o": 600, "g": 30, "n": 2, "th": {"40": 1}}}
+        self.assertIsNone(USAGE._perf_summary(old))
+        fresh = {}
+        self.assertFalse(USAGE._perf_add(fresh, "m", 300, 15))
+        USAGE._perf_add(fresh, "m", 300, 3, measured_generation=True)
+        for merged in (USAGE._perf_merge({}, old), USAGE._ledger_perf_values(old, {})):
+            self.assertIsNone(USAGE._perf_summary(merged))
+        self.assertEqual(USAGE._perf_summary(USAGE._ledger_perf_values(old, fresh))["tps"], 100)
 
     def test_merging_two_sources_adds_everything_up(self):
         a, b = {}, {}
@@ -142,6 +152,38 @@ class CodexPerfTests(unittest.TestCase):
         self.assertEqual(summary["tps"], 50.0, "500 token / 从首字到落盘的 10 秒")
         self.assertEqual(round(summary["ttft"], 1), 2.0, "首字算到第一段思考，工具执行不算")
 
+    def test_missing_first_token_counts_usage_only_after_warm_cache_upgrade(self):
+        lines = self.rollout(2)
+        del lines[-2]  # 第二次有起点和用量，没有首字。
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "rollout-a.jsonl"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            cache = {"v": USAGE._SCAN_CACHE_VERSION}
+            expected = self.scan(tmp, cache)["ranges"]["all"]
+            self.assertEqual(expected["out"], 1000)
+            summary = USAGE._perf_summary(expected["perf"])
+            self.assertEqual((summary["n"], summary["o"], summary["g"]), (1, 500, 10))
+
+            # 模拟旧逐请求缓存与旧日汇总，其中第二次计入了 12 秒端到端耗时。
+            events = list(USAGE._iter_codex_cached_events(str(path)))
+            events[-1][13] = 12
+            entry = cache["codex"][str(path.resolve())]
+            entry["event_cache_size"] = USAGE._codex_write_event_cache(str(path), events)
+            for day in entry["deduped_days"].values():
+                day["perf"] = day.pop("generation_perf")
+            with mock.patch.object(USAGE, "_iter_codex_usage_records",
+                                   side_effect=AssertionError("reuse event cache")):
+                self.assertEqual(self.scan(tmp, cache)["ranges"]["all"], expected)
+
+    def test_ledger_only_legacy_timing_keeps_usage(self):
+        day = self.T0.date().isoformat()
+        USAGE._load_ledger()["tools"]["codex"] = {
+            day: {"out": 500, "perf": {"gpt-6-sol": {"n": 1, "o": 500, "g": 12}}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.scan(tmp, {"v": USAGE._SCAN_CACHE_VERSION})["ranges"]["all"]
+        self.assertEqual(result["out"], 500)
+        self.assertIsNone(USAGE._perf_summary(result.get("perf")))
+
     def test_an_incremental_read_keeps_the_timing_state(self):
         lines = self.rollout(6)
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,11 +236,11 @@ class ClaudePerfTests(unittest.TestCase):
         self.assertEqual(summary["tps"], round(400 / 5.5, 1))
         self.assertEqual(round(summary["ttft"], 1), 0.5)
 
-    def test_without_thinking_timing_speed_is_end_to_end(self):
+    def test_without_thinking_timing_counts_usage_only(self):
         result = self.scan(self.records(5, think=False))
         summary = USAGE._perf_summary(result["ranges"]["all"].get("perf"))
-        self.assertEqual(summary["tps"], round(400 / 6, 1), "从用户消息算到最后一段输出")
-        self.assertIsNone(summary["ttft"])
+        self.assertIsNone(summary)
+        self.assertEqual(result["ranges"]["all"]["out"], 2000)
 
     def test_request_start_skips_attachments_written_with_the_reply(self):
         start = datetime.now().astimezone().replace(microsecond=0) - timedelta(hours=1)
@@ -249,15 +291,15 @@ class DurationFieldPerfTests(unittest.TestCase):
             connection.commit()
             connection.close()
             days = USAGE._scan_zcode_database(str(db))
-        perf = USAGE._perf_summary(next(iter(days.values()))["perf"])
-        self.assertEqual(perf["tps"], 100.0, "输出 400（已含推理）/ 4 秒")
+        perf = USAGE._perf_summary(next(iter(days.values())).get("perf"))
+        self.assertIsNone(perf)
 
-    def test_qwen_request_carries_its_api_duration(self):
+    def test_qwen_total_api_duration_does_not_measure_generation(self):
         from test_qwencode import request_record
         record = request_record("r1", "s1", 1000, output=300, thoughts=100)
         record["apiDurationMs"] = 2000
         entry = USAGE._qwen_request_entry(record)
-        self.assertEqual(entry["gen"], 2.0)
+        self.assertNotIn("gen", entry)
 
     def test_muse_uses_the_model_call_duration(self):
         import test_musecode as muse
@@ -267,7 +309,7 @@ class DurationFieldPerfTests(unittest.TestCase):
             result, _ = case.scan(tmp)
         perf = USAGE._perf_summary(result["ranges"]["all"].get("perf"))
         # 两次调用各 1 秒：(500+50) + (200+10) 个 token
-        self.assertEqual((perf["n"], perf["tps"]), (2, 380.0))
+        self.assertIsNone(perf)
 
 
 class QoderCliPerfTests(unittest.TestCase):
@@ -286,7 +328,7 @@ class QoderCliPerfTests(unittest.TestCase):
             case.write_jsonl(root / "project" / "session.jsonl", rows + [first, last])
             result, _ = case.scan_cli(root)
         perf = USAGE._perf_summary(result["ranges"]["all"].get("perf"))
-        self.assertEqual((perf["n"], perf["tps"]), (1, 100.0), "400 token / 用户消息到最后一行的 4 秒")
+        self.assertIsNone(perf)
 
 
 class DeepSeekHarnessPerfTests(unittest.TestCase):
@@ -336,30 +378,6 @@ class DeepSeekHarnessPerfTests(unittest.TestCase):
 
 
 class LogAndDatabasePerfTests(unittest.TestCase):
-    def test_hermes_reads_api_call_latency_from_agent_log(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            logs = Path(tmp) / ".hermes" / "logs"
-            logs.mkdir(parents=True)
-            (logs / "agent.log").write_text(
-                "2026-06-04 18:03:59,497 INFO [s] agent.conversation_loop: API call #1: "
-                "model=grok-4.3 provider=xai-oauth in=17277 out=326 total=17603 latency=5.0s\n"
-                "2026-06-04 18:04:10,000 INFO [s] agent.conversation_loop: API call #2: "
-                "model=grok-4.3 provider=xai-oauth in=17300 out=5 total=17305 latency=1.0s\n",
-                encoding="utf-8")
-            cache = {}
-            with mock.patch.object(USAGE, "HOME", tmp):
-                days = USAGE._hermes_log_perf(cache)
-                with mock.patch.object(USAGE, "_perf_add", side_effect=AssertionError("reparsed")):
-                    USAGE._hermes_log_perf(cache)
-        perf = USAGE._perf_summary(days["2026-06-04"])
-        self.assertEqual((perf["n"], perf["tps"]), (1, 65.2), "太短的回复不算样本")
-
-    def test_pi_stream_seconds_runs_from_request_to_persist(self):
-        self.assertEqual(USAGE._pi_stream_seconds("2026-06-04T10:00:05.500Z",
-                                                  1780567200000), 5.5)
-        self.assertIsNone(USAGE._pi_stream_seconds("2026-06-04T10:00:00.100Z", 1780567200000))
-        self.assertIsNone(USAGE._pi_stream_seconds(None, 1780567200000))
-
     def test_opencode_steps_restart_after_the_previous_step(self):
         import sqlite3
         connection = sqlite3.connect(":memory:")

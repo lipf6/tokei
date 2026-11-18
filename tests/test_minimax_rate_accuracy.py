@@ -87,11 +87,10 @@ class MiniMaxRateAccuracyTests(unittest.TestCase):
         self.assertEqual((perf["g"], perf["tps"], perf["en"]), (10, 60, 0))
         self.assertAlmostEqual(perf["ttft"], 2, delta=0.05)
 
-    def test_recorded_total_without_decode_time_is_marked_including_wait(self):
+    def test_recorded_total_without_decode_time_is_excluded(self):
         self.request(end=60, request_duration_ms=12000)
         perf, _ = self.raw()
-        self.assertEqual((perf["g"], perf["tps"], perf["en"]), (12, 50, 1))
-        self.assertIsNone(perf["ttft"])
+        self.assertIsNone(perf)
 
     def test_decode_time_without_total_still_supports_generation_speed(self):
         self.request(end=60, decode_duration_ms=10000)
@@ -99,11 +98,10 @@ class MiniMaxRateAccuracyTests(unittest.TestCase):
         self.assertEqual((perf["g"], perf["tps"], perf["en"]), (10, 60, 0))
         self.assertIsNone(perf["ttft"])
 
-    def test_legacy_timestamps_are_marked_including_wait(self):
+    def test_legacy_timestamps_are_excluded(self):
         self.request(end=30, usage={})
         perf, _ = self.raw()
-        self.assertEqual((perf["g"], perf["tps"], perf["en"]), (30, 20, 1))
-        self.assertIsNone(perf["ttft"])
+        self.assertIsNone(perf)
 
     def test_legacy_multi_call_persistence_is_not_mistaken_for_model_completion(self):
         self.request(out=200, end=10)
@@ -116,7 +114,7 @@ class MiniMaxRateAccuracyTests(unittest.TestCase):
         self.request(out=200, end=90, request_duration_ms=10000)
         self.request(start=100, out=600, end=200, request_duration_ms=12000)
         perf, _ = self.raw()
-        self.assertEqual((perf["o"], perf["g"], perf["n"], perf["en"]), (800, 22, 2, 2))
+        self.assertIsNone(perf)
 
     def test_legacy_tool_completion_is_not_used_as_model_end_time(self):
         self.home.usage("s", "t", ts=self.start, out=600, model="MiniMax-M3")
@@ -191,7 +189,7 @@ class MiniMaxRateAccuracyTests(unittest.TestCase):
                     connection.execute("DELETE FROM local_runtime_message_rows")
                 self.request(end=60, decode_duration_ms=value, request_duration_ms=12000)
                 perf, _ = self.raw()
-                self.assertEqual((perf["g"], perf["tps"], perf["en"]), (12, 50, 1))
+                self.assertIsNone(perf)
 
     def test_non_finite_json_timing_does_not_discard_other_valid_requests(self):
         self.request(turn="nan", decode_duration_ms=float("nan"), request_duration_ms=12000)
@@ -200,11 +198,10 @@ class MiniMaxRateAccuracyTests(unittest.TestCase):
         perf, _ = self.raw()
         self.assertEqual((perf["g"], perf["tps"], perf["n"]), (10, 60, 1))
 
-    def test_inconsistent_durations_use_total_and_mark_wait(self):
+    def test_inconsistent_durations_exclude_speed(self):
         self.request(end=60, decode_duration_ms=15000, request_duration_ms=12000)
         perf, _ = self.raw()
-        self.assertEqual((perf["g"], perf["en"]), (12, 1))
-        self.assertIsNone(perf["ttft"])
+        self.assertIsNone(perf)
 
     def test_outlier_generation_timing_is_filtered_without_switching_basis(self):
         self.request(decode_duration_ms=5, request_duration_ms=12000)

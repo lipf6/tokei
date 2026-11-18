@@ -579,7 +579,6 @@
 "平均 TTFT" = "Avg TTFT";
 "TTFT 中位数" = "Median TTFT";
 "平均响应" = "Avg response";
-"输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算" = "Total output tokens ÷ total generation time over %@ requests; requests without a first-token time use their full duration";
 "首字延迟：从发出请求到收到第一个 token 的时间，%@ 个请求的中位数" = "Time to first token: from sending the request to receiving the first token, median over %@ requests";
 "平均输出速度来自 %@ 个请求" = "Average output speed over %@ requests";
 "平均输出速度来自 %@ 个请求，TTFT 中位数来自其中 %@ 个" = "Average output speed over %@ requests; median TTFT over %@ of them";
@@ -603,9 +602,6 @@
 
 /* 性能指标 */
 "仅输出" = "Output only";
-"平均输出速度（含等待）" = "Avg output speed (incl. wait)";
-"平均速度（含等待）" = "Avg speed (incl. wait)";
-"输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度" = "Total output tokens ÷ recorded duration; of %@ requests, %@ include first-token wait, so pure generation speed is unavailable";
 "按 API 价估算；缺少完整明细时，周期首尾按 token 占比分摊" = "Estimated at API prices; cycle edges are split by token share when complete event details are unavailable";
 "这个周期约花了 %@" = "About %@ this cycle";
 "本周期已花" = "This cycle";
@@ -622,3 +618,5 @@
 "当前时间范围内还没有检测到额度下降" = "No quota drop detected in this range yet";
 "日均" = "Daily avg";
 "正在读取周额度…" = "Reading weekly quota…";
+
+"有效请求的输出 token 合计 ÷ 首字后的生成总时长" = "Total output tokens from timed requests divided by total generation time after the first token";

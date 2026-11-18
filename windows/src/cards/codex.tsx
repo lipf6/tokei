@@ -102,7 +102,8 @@ function CodexCard({ ctx }: { ctx: CardContext }) {
     metric("arrow.up", L("输出"), Fmt.human(r.out)),
   ];
   if (r.reason > 0) extra.push(metric("brain", L("推理"), Fmt.human(r.reason)));
-  extra.push(...perfMetrics(r.perf));
+  const perf = r.generation_only ? r.perf : null;
+  extra.push(...perfMetrics(perf));
   const reserve = x.reserve_ranges ? getRange(x.reserve_ranges, ctx.range, EMPTY_CODEX_RANGE) : null;
   const reserveQuota = x.reserve_quota;
   return (
@@ -114,7 +115,7 @@ function CodexCard({ ctx }: { ctx: CardContext }) {
           <MetricGrid top={[metric("dollarsign.circle", L("≈成本"), Fmt.dollars(r.cost))]} hit={r.hit} extra={extra} tint={Theme.codex} />
           {(r.models?.length ?? 0) > 0 && (
             <ModelDisclosure
-              rows={tokenModelRows(r.models ?? [], { reasonIncludedInOutput: true, perf: r.perf })}
+              rows={tokenModelRows(r.models ?? [], { reasonIncludedInOutput: true, perf })}
               tint={Theme.codex}
               periodLabel={ctx.rangeLabel}
             />

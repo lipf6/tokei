@@ -25,12 +25,18 @@ export interface PerfModelStat {
 }
 
 export interface PerfStat extends PerfModelStat {
+  generation_only?: boolean;
+  en?: number;
   models?: Record<string, PerfModelStat> | null;
+}
+
+export function isGenerationOnly(perf: PerfStat | null | undefined): perf is PerfStat {
+  return !!perf && (perf.generation_only === true || (perf.n > 0 && perf.tn === perf.n && !perf.en));
 }
 
 /** 按模型行的显示名找这一行的速度；对不上时只比字母和数字（GLM-5.3 / glm 5.3）。 */
 export function modelPerf(perf: PerfStat | null | undefined, name: string): PerfModelStat | undefined {
-  const models = perf?.models;
+  const models = isGenerationOnly(perf) ? perf.models : undefined;
   if (!models) return undefined;
   if (models[name]) return models[name];
   const key = matchKey(name);
@@ -102,6 +108,7 @@ export interface TokenModelStat {
 }
 
 export interface CodexRange {
+  generation_only?: boolean;
   hit: number;
   in: number;
   cached: number;

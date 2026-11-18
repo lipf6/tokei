@@ -48,11 +48,10 @@ class PiRateAccuracyTests(unittest.TestCase):
         result = U.scan_pi(U.range_bounds(), {} if cache is None else cache)["ranges"]["all"]
         return U._perf_summary(result.get("perf")), result
 
-    def test_standard_pi_rate_is_end_to_end_and_has_no_invented_ttft(self):
+    def test_standard_pi_counts_tokens_without_stream_timing(self):
         self.write(self.record(elapsed=30))
         perf, result = self.scan()
-        self.assertEqual((perf["o"], perf["g"], perf["tps"], perf["en"]), (600, 30, 20, 1))
-        self.assertIsNone(perf["ttft"])
+        self.assertIsNone(perf)
         self.assertEqual(U.token_total(result), 700)
 
     def test_recorded_timing_excludes_wait_and_delayed_persistence(self):
@@ -61,11 +60,10 @@ class PiRateAccuracyTests(unittest.TestCase):
         self.assertEqual((perf["g"], perf["tps"], perf["en"], perf["tn"]), (10, 60, 0, 1))
         self.assertAlmostEqual(perf["ttft"], 2, delta=0.05)
 
-    def test_recorded_duration_without_first_token_time_still_includes_wait(self):
+    def test_recorded_duration_without_first_token_time_is_excluded(self):
         self.write(self.record(elapsed=45, duration=10000))
         perf, _ = self.scan()
-        self.assertEqual((perf["g"], perf["tps"], perf["en"]), (10, 60, 1))
-        self.assertIsNone(perf["ttft"])
+        self.assertIsNone(perf)
 
     def test_long_first_token_wait_does_not_reduce_generation_speed(self):
         self.write(self.record(elapsed=240, duration=210000, ttft=200000))
@@ -76,22 +74,22 @@ class PiRateAccuracyTests(unittest.TestCase):
     def test_invalid_recorded_timing_falls_back_without_inflating_rate(self):
         for duration, ttft in [(None, 2000), (True, 0), (-1, 0), (float("nan"), 0), (float("inf"), 0)]:
             with self.subTest(duration=duration, ttft=ttft):
-                timing = U._pi_request_timing(self.record(), self.record(duration=duration, ttft=ttft)["message"])
-                self.assertEqual(timing, (30, None, True))
+                timing = U._pi_request_timing(self.record(duration=duration, ttft=ttft)["message"])
+                self.assertIsNone(timing)
         for ttft in (12000, 15000, -1, True, float("inf")):
-            timing = U._pi_request_timing(self.record(), self.record(duration=12000, ttft=ttft)["message"])
-            self.assertEqual(timing, (12, None, True))
+            timing = U._pi_request_timing(self.record(duration=12000, ttft=ttft)["message"])
+            self.assertIsNone(timing)
 
     def test_weighted_rate_and_wait_sample_count_survive_flush_and_restart(self):
         self.write(self.record(duration=12000, ttft=2000), self.record(output=400, elapsed=40))
         perf, _ = self.scan()
-        self.assertEqual((perf["o"], perf["g"], perf["tps"], perf["n"], perf["en"]), (1000, 50, 20, 2, 1))
+        self.assertEqual((perf["o"], perf["g"], perf["tps"], perf["n"], perf["en"]), (600, 10, 60, 1, 0))
         U.ledger_flush()
         U._LEDGER_CACHE.update(data=None, dirty=False, urgent=False)
         after, _ = self.scan()
         self.assertEqual(after, perf)
         stored = next(iter(U._load_ledger()["tools"]["pi"].values()))
-        self.assertEqual(stored["perf"]["fixture/m"]["en"], 1)
+        self.assertTrue(stored["perf"]["fixture/m"]["generation_only"])
 
     def test_parser_upgrade_replaces_old_duration_in_cache_and_ledger(self):
         path = self.write(self.record(elapsed=45, duration=12000, ttft=2000))

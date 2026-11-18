@@ -488,7 +488,6 @@
 "平均 TTFT" = "TTFT moy.";
 "TTFT 中位数" = "TTFT médian";
 "平均响应" = "Réponse moy.";
-"输出 token 总数 ÷ 生成总时长，来自 %@ 个请求；拿不到首字时间的请求按整个请求的耗时算" = "Total des tokens de sortie ÷ durée totale de génération sur %@ requêtes ; les requêtes sans heure du premier token comptent leur durée complète";
 "首字延迟：从发出请求到收到第一个 token 的时间，%@ 个请求的中位数" = "Délai du premier token : de l'envoi de la requête à la réception du premier token, médiane sur %@ requêtes";
 "平均输出速度来自 %@ 个请求" = "Vitesse de sortie moyenne sur %@ requêtes";
 "平均输出速度来自 %@ 个请求，TTFT 中位数来自其中 %@ 个" = "Vitesse de sortie moyenne sur %@ requêtes ; TTFT médian sur %@ d'entre elles";
@@ -499,9 +498,6 @@
 "仅输出" = "Sortie uniquement";
 
 /* 性能指标 */
-"平均输出速度（含等待）" = "Vitesse moyenne (attente incluse)";
-"平均速度（含等待）" = "Vitesse moy. (attente incluse)";
-"输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度" = "Tokens de sortie ÷ durée enregistrée ; sur %@ requêtes, %@ incluent l’attente du premier token. La vitesse de génération seule est indisponible.";
 "按 API 价估算；缺少完整明细时，周期首尾按 token 占比分摊" = "Estimé aux tarifs API ; les extrémités du cycle sont réparties selon les tokens si les détails complets manquent";
 "这个周期约花了 %@" = "Environ %@ sur ce cycle";
 "本周期已花" = "Ce cycle";
@@ -519,3 +515,5 @@
 "当前时间范围内还没有检测到额度下降" = "Aucune baisse de quota détectée dans cette plage pour l'instant";
 "日均" = "Moyenne quotidienne";
 "正在读取周额度…" = "Lecture du quota hebdomadaire…";
+
+"有效请求的输出 token 合计 ÷ 首字后的生成总时长" = "Total des tokens de sortie des requêtes chronométrées divisé par le temps de génération après le premier token";

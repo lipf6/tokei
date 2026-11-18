@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# TOKEI_COLLECTOR_REVISION=9
+# TOKEI_COLLECTOR_REVISION=11
 # <bitbar.title>AI Usage Bar</bitbar.title>
 # <bitbar.version>v0.1</bitbar.version>
 # <bitbar.author>local</bitbar.author>
@@ -1643,9 +1643,11 @@ def _ledger_perf_values(left, right, subtract=False):
     result = {}
     for model in left.keys() | right.keys():
         a, b = left.get(model), right.get(model)
-        a = a if isinstance(a, dict) else {}
-        b = b if isinstance(b, dict) else {}
-        stats = {}
+        a = a if _generation_stats(a) else {}
+        b = b if _generation_stats(b) else {}
+        if not a and not b:
+            continue
+        stats = {"generation_only": True}
         for field in ("o", "n"):
             value = int(a.get(field, 0) or 0) + sign * int(b.get(field, 0) or 0)
             stats[field] = max(value, 0)
@@ -1673,7 +1675,7 @@ def _ledger_values(left, right, subtract=False):
         if key == "_sources":
             continue
         a, b = left.get(key), right.get(key)
-        if key == "perf":
+        if key in ("perf", "generation_perf"):
             result[key] = _ledger_perf_values(a, b, subtract)
         elif isinstance(a, dict) or isinstance(b, dict):
             result[key] = _ledger_values(a if isinstance(a, dict) else {},
@@ -2115,7 +2117,7 @@ def _iter_cached_token_days(tool_cache):
 # ---------- 平均输出速度 / TTFT 中位数 ----------
 # 每个请求一个样本：输出 token、生成秒数、TTFT（拿得到才有）。按「天 × 模型」累加进
 # day["perf"]，跟着按会话合并和账本一起走——_ledger_values 对嵌套字典逐项相加，正好是对的。
-# 生成秒数：拿得到首字时间就从首字算到输出结束（纯生成），拿不到就从请求开始算（端到端）。
+# 生成秒数取首字至完成的间隔或直接解码时长。只有总耗时的请求仅计用量。
 # 平均输出速度 = 输出 token 总数 ÷ 生成总秒数，存累加值 o/g/n，合并后再相除，是精确的。
 # TTFT 有长尾（排队、压缩上下文能等上几十秒），平均值会被少数请求拉高，所以取中位数：
 # 存成按 5% 等比分桶的直方图 "th"，桶内插值得到近似中位数，跨天、跨设备可直接相加。
@@ -2144,25 +2146,40 @@ def _perf_ttft_bounds(bucket):
             _PERF_TTFT_BASE * _PERF_TTFT_RATIO ** bucket)
 
 
-def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None, *, includes_wait=False):
+def _generation_stats(stats):
+    """旧汇总只有在每次请求均有首字观测时才能确认口径。"""
+    if not isinstance(stats, dict) or stats.get("en"):
+        return False
+    if stats.get("generation_only"):
+        return True
+    n = stats.get("n", 0)
+    return n > 0 and any(sum(hist.values()) == n for hist in
+                         (stats.get("th") or {}, stats.get("t") or {}))
+
+
+def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None, *, measured_generation=False):
+    # 首字时间未知时，只接受调用方从解码计时或首个内容块直接量得的生成时长。
+    if ttft_seconds is None and not measured_generation:
+        return False
     try:
         out = int(out_tokens or 0)
         gen = float(gen_seconds or 0)
     except (TypeError, ValueError, OverflowError):
         return False
+        ttft = float(ttft_seconds) if ttft_seconds is not None else None
     if out < _PERF_MIN_OUTPUT or not 0.2 < gen <= _PERF_MAX_SECONDS or out / gen > _PERF_MAX_TPS:
         return False
-    stats = perf.setdefault(model or "unknown", {"o": 0, "g": 0.0, "n": 0})
+    if ttft is not None and (not math.isfinite(ttft) or ttft < 0):
+        return False
+    model = model or "unknown"
+    if not _generation_stats(perf.get(model)):
+        perf[model] = {"o": 0, "g": 0.0, "n": 0}
+    stats = perf[model]
+    stats["generation_only"] = True
     stats["o"] += out
     stats["g"] = round(stats["g"] + gen, 3)
     stats["n"] += 1
-    if includes_wait:
-        stats["en"] = stats.get("en", 0) + 1
-    try:
-        ttft = float(ttft_seconds) if ttft_seconds is not None else None
-    except (TypeError, ValueError):
-        ttft = None
-    if ttft is not None and 0 <= ttft <= _PERF_MAX_TTFT:
+    if ttft is not None and ttft <= _PERF_MAX_TTFT:
         hist = stats.setdefault("th", {})
         bucket = str(_perf_ttft_bucket(ttft))
         hist[bucket] = hist.get(bucket, 0) + 1
@@ -2171,11 +2188,12 @@ def _perf_add(perf, model, out_tokens, gen_seconds, ttft_seconds=None, *, includ
 
 def _perf_merge(dst, src):
     for model, stats in (src or {}).items():
-        if not isinstance(stats, dict):
+        if not _generation_stats(stats):
             continue
         target = dst.setdefault(model, {"o": 0, "g": 0.0, "n": 0})
         target["o"] += int(stats.get("o", 0) or 0)
         target["g"] = round(target["g"] + float(stats.get("g", 0) or 0), 3)
+        target["generation_only"] = True
         target["n"] += int(stats.get("n", 0) or 0)
         if stats.get("en"):
             target["en"] = int(target.get("en", 0) or 0) + int(stats["en"])
@@ -2266,6 +2284,7 @@ def _perf_summary(perf, name=None):
         return None
     overall["models"] = {model: value for model, value in
                          ((model, one(stats)) for model, stats in by_name.items()) if value}
+    overall["generation_only"] = True
     return overall
 
 
@@ -2471,7 +2490,7 @@ def _dedupe_claude_events(file_events):
 
 # 1：每个请求附上计时（生成秒数、首字延迟），升级后整份重扫一次补上历史。
 # 2：请求起点沿父链跳过附件行，找到真正触发请求的用户消息或工具结果。
-_CLAUDE_PERF_VERSION = 2
+_CLAUDE_PERF_VERSION = 3
 # 顶层的 uuid 和 timestamp 紧挨着，正文里的引号都是转义过的，所以这个模式只会命中顶层字段。
 # 用它取用户消息、工具结果这些行的写入时间，不必整行解析大段的工具输出。
 _CLAUDE_LINE_TIME = re.compile(r'"uuid"\s*:\s*"([0-9a-f-]{36})"\s*,\s*"timestamp"\s*:\s*"([^"]+)"')
@@ -2581,7 +2600,7 @@ def _claude_attach_perf(events, when, via=None):
 
     请求从触发它的那条消息（第一段输出沿 parentUuid 往上、跳过附件后的用户提问或工具结果）
     写入时开始，到最后一段输出写入时结束。新版 Claude Code 的思考段带 thinkingDurationMs：思考段写入时刻
-    减去它就是第一个 token 到达的时刻——有它就算纯生成速度和首字延迟，没有就只能算端到端。
+    减去它就是第一个 token 到达的时刻——有它就算纯生成速度和首字延迟，缺少首段计时只统计用量。
     """
     by_request = {}
     for event in events:
@@ -2608,8 +2627,6 @@ def _claude_attach_perf(events, when, via=None):
             gen = end - first
             if start is not None and first >= start:
                 ttft = first - start
-        elif start is not None and end > start:
-            gen = end - start
         if gen:
             timing = [round(gen, 3), round(ttft, 3) if ttft is not None else None]
             for event in group:
@@ -2708,7 +2725,7 @@ def scan_claude(bounds, cache):
             timing = event.get("perf")
             if timing:
                 _perf_add(day.setdefault("perf", {}), model, event["out"], timing[0],
-                          timing[1] if len(timing) > 1 else None)
+                          timing[1] if len(timing) > 1 else None, measured_generation=True)
             amount = _claude_event_total(event)
             aggregate["hours"][dt.hour] += amount
             aggregate["day_hours"].setdefault(day_key, [0] * 24)[dt.hour] += amount
@@ -3950,9 +3967,9 @@ def _codex_add_event(days, event):
     day["reason"] += lr
     day["cost"] += cost
     _add_model_usage(day["models"], model, max(li - lc, 0), lo, lc, 0, lr, cost)
-    if len(event) > 13 and event[13]:
-        _perf_add(day.setdefault("perf", {}), model, lo, event[13],
-                  event[14] if len(event) > 14 else None)
+    # 旧事件只有生成耗时而没有 TTFT 时可能包含整个请求，不能混入首字后的速度。
+    if len(event) > 14 and event[14] is not None:
+        _perf_add(day.setdefault("generation_perf", {}), model, lo, event[13], event[14])
     try:
         hour = datetime.fromisoformat(event[0]).astimezone().hour
         amount = li + lo
@@ -3980,9 +3997,9 @@ def _codex_split_day(day):
         return main, reserve
 
     model_hours = day.get("model_hours") or {}
-    for model, stats in (day.get("perf") or {}).items():
+    for model, stats in (day.get("generation_perf") or {}).items():
         target = reserve if _codex_is_reserve_model(model) else main
-        _perf_merge(target.setdefault("perf", {}), {model: stats})
+        _perf_merge(target.setdefault("generation_perf", {}), {model: stats})
     for model, usage in models.items():
         target = reserve if _codex_is_reserve_model(model) else main
         li = usage.get("in", 0)
@@ -5098,15 +5115,13 @@ def scan_codex(bounds, cache, local_only=False):
                             model = _CODEX_RESERVE_MODEL
                         cost = _codex_estimated_cost(model, li, lc, lo)
                         totals = total_key if total_key is not None else (None, None, None, None)
-                        # 这个请求的计时：有首字时间就算纯生成（并给出首字延迟），否则算端到端
+                        # 用请求起点确认首字属于本次调用，只计首字至用量落盘的时间。
                         end_ms = ts.timestamp() * 1000
                         gen = ttft = None
-                        if perf_first is not None and end_ms > perf_first:
+                        if (perf_trigger is not None and perf_first is not None
+                                and perf_trigger <= perf_first < end_ms):
                             gen = round((end_ms - perf_first) / 1000, 3)
-                            if perf_trigger is not None and perf_first >= perf_trigger:
-                                ttft = round((perf_first - perf_trigger) / 1000, 3)
-                        elif perf_trigger is not None and end_ms > perf_trigger:
-                            gen = round((end_ms - perf_trigger) / 1000, 3)
+                            ttft = round((perf_first - perf_trigger) / 1000, 3)
                         # timestamp, local day, cumulative usage, incremental usage, cost,
                         # model, response id, generation seconds, time to first token
                         if li or lc or lo or lr:
@@ -5218,7 +5233,9 @@ def scan_codex(bounds, cache, local_only=False):
     canonical_fc = _codex_canonical_file_cache(fc)
     for f, entry in fc.items():
         is_canonical = f in canonical_fc
-        if is_canonical and not entry.get("canonical"):
+        # 旧分日汇总混入了等待时间。用已有逐请求缓存重算一次，无须重读 rollout。
+        legacy_perf = any("perf" in day for day in (entry.get("deduped_days") or {}).values())
+        if is_canonical and (not entry.get("canonical") or legacy_perf):
             dedupe_paths.add(f)
         if entry.get("canonical") != is_canonical:
             entry["canonical"] = is_canonical
@@ -5310,8 +5327,8 @@ def scan_codex(bounds, cache, local_only=False):
                         usage.get("out", 0), usage.get("cr", 0),
                         usage.get("cw", 0), usage.get("reason", 0),
                         usage.get("cost", 0))
-                if day.get("perf"):
-                    _perf_merge(bucket.setdefault("perf", {}), day["perf"])
+                if day.get("generation_perf"):
+                    _perf_merge(bucket.setdefault("perf", {}), day["generation_perf"])
 
     _assemble_codex_ranges(B, merged_days, main_sessions)
 
@@ -6077,11 +6094,6 @@ def _grok_usage_record(obj):
     record = {"id": record_id, "ts": ts, "sid": sid,
               "in": prompt - cached, "cr": cached,
               "out": completion - reasoning, "reason": reasoning}
-    # 这次推理的总耗时（发出请求到结束）。Grok 自带的 ttft_ms 和客户端实际收到第一段的
-    # 时刻对不上、含义不明，所以不拿它拆首字，只算端到端速度。
-    elapsed = ctx.get("model_elapsed_ms")
-    if isinstance(elapsed, (int, float)) and elapsed > 0:
-        record["gen"] = round(elapsed / 1000, 3)
     return record
 
 
@@ -6195,10 +6207,6 @@ def _grok_usage_days(records, sessions, latest_model):
         cost = _grok_usage_cost(record, model)
         _add_token_usage(day, record.get("in", 0), record.get("out", 0),
                          record.get("cr", 0), 0, record.get("reason", 0), cost, model)
-        if record.get("gen"):
-            _perf_add(day.setdefault("perf", {}), model,
-                      int(record.get("out", 0) or 0) + int(record.get("reason", 0) or 0),
-                      record["gen"])
         day["tokens"] += amount
         day["calls"] += 1
         if sid:
@@ -10437,52 +10445,6 @@ def scan_qoder_ide(bounds, cache):
 
 # ---------- Hermes ----------
 # SQLite: ~/.hermes/state.db (旧布局) + ~/.hermes/profiles/*/state.db (profile 布局)
-# agent.log 每次 API 调用一行：
-#   2026-06-04 18:03:59,497 INFO [...] agent.conversation_loop: API call #1: model=grok-4.3
-#   provider=xai-oauth in=17277 out=326 total=17603 latency=5.9s ...
-# latency 是发出请求到收完的时间（含重试退避），只能算端到端；out 已含推理。
-_HERMES_API_CALL = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}) [\d:,]+ .*?API call #\d+: model=(\S+) .*?\bout=(\d+) .*?\blatency=([\d.]+)s")
-
-
-def _hermes_log_perf(cache):
-    """{日期: {模型: 速度样本}}，按日志文件签名缓存。"""
-    store = cache.setdefault("hermes_logs", {})
-    paths = [os.path.join(HOME, ".hermes", "logs", "agent.log")]
-    profiles = os.path.join(HOME, ".hermes", "profiles")
-    if os.path.isdir(profiles):
-        paths += [os.path.join(profiles, name, "logs", "agent.log") for name in os.listdir(profiles)]
-    paths = [path for path in paths if os.path.isfile(path)]
-    for path in set(store) - set(paths):
-        store.pop(path, None)
-        cache["_dirty"] = True
-    for path in paths:
-        try:
-            st = os.stat(path)
-        except OSError:
-            continue
-        sig = f"{st.st_mtime_ns}:{st.st_size}"
-        if isinstance(store.get(path), dict) and store[path].get("sig") == sig:
-            continue
-        days = {}
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    if "API call #" not in line:
-                        continue
-                    match = _HERMES_API_CALL.search(line)
-                    if match:
-                        _perf_add(days.setdefault(match.group(1), {}), match.group(2),
-                                  int(match.group(3)), float(match.group(4)))
-        except OSError:
-            continue
-        store[path] = {"sig": sig, "days": days}
-        cache["_dirty"] = True
-    merged = {}
-    for entry in store.values():
-        for day_key, perf in (entry.get("days") or {}).items():
-            _perf_merge(merged.setdefault(day_key, {}), perf)
-    return merged
 
 
 def _hermes_db_paths():
@@ -10938,11 +10900,6 @@ def _qodercli_usage_days(entries, use_cached=True):
         hour = event.get("hour")
         if isinstance(hour, int) and 0 <= hour < 24:
             day["hours"][hour] += token_total
-        start, end = event.get("start"), event.get("end")
-        if start and end and end > start:
-            # 端到端：从触发它的用户消息或工具结果算到最后一行
-            _perf_add(day.setdefault("perf", {}), event.get("model"),
-                      int(event.get("out", 0) or 0), end - start)
         model_name = event.get("model")
         if model_name and (token_total > 0 or event.get("credits", 0)):
             model_usage = day["models"].setdefault(model_name,
@@ -11143,13 +11100,6 @@ def scan_hermes(bounds, cache):
                 for key in TOKEN_FIELDS:
                     mm[key] += mv.get(key, 0)
                 mm["cost"] += mv.get("cost", 0)
-    for day_key, perf in _hermes_log_perf(cache).items():
-        try:
-            d = date.fromisoformat(day_key)
-        except ValueError:
-            continue
-        for k in classify_date(d, bounds):
-            _perf_merge(B[k].setdefault("perf", {}), perf)
     if changed:
         cache["_dirty"] = True
     return {"ranges": B}
@@ -11436,9 +11386,6 @@ def _openclaw_usage_record(event, created_at=None, session_model=None):
     record = {"date": occurred_at.date().isoformat(), "hour": occurred_at.hour,
               "in": inp, "out": out, "cr": cr, "cw": cw, "reason": reason,
               "cost": cost, "model": model}
-    seconds = _pi_stream_seconds(event.get("timestamp"), message.get("timestamp"))
-    if seconds:
-        record["gen"] = round(seconds, 3)
     return record
 
 
@@ -11446,9 +11393,6 @@ def _openclaw_add_record(days, record):
     day = days.setdefault(record["date"], _empty_token_day())
     _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
                      record["reason"], record["cost"], record["model"])
-    if record.get("gen"):
-        # reasoningTokens 已含在 output 里
-        _perf_add(day.setdefault("perf", {}), record["model"], record["out"], record["gen"])
     day["hours"][record["hour"]] += _openclaw_token_total(record)
 
 
@@ -11864,28 +11808,8 @@ def _pi_usage_int(usage, *fields):
     return 0
 
 
-def _pi_stream_seconds(persisted, started):
-    """pi-ai 系（Pi、Prime Agent、OpenClaw）：message.timestamp 是开始流式请求的时刻
-    （毫秒），外层记录的 timestamp 是这条回复写入的时刻。两者之差是端到端耗时。"""
-    end = parse_ts(persisted) if isinstance(persisted, str) else None
-    if isinstance(started, (int, float)) and not isinstance(started, bool):
-        start = started / 1000 if started > 1e11 else float(started)
-    else:
-        parsed = parse_ts(started) if isinstance(started, str) else None
-        start = parsed.timestamp() if parsed else None
-    if end is None or start is None:
-        return None
-    seconds = end.timestamp() - start
-    return seconds if 0.2 < seconds <= _PERF_MAX_SECONDS else None
-
-
-def _pi_request_timing(record, message):
-    """Prefer recorded request timing (Pi-compatible clients use milliseconds).
-
-    Standard Pi sessions only preserve request-start and persistence timestamps.
-    Their rate includes first-token wait and must stay marked as end-to-end.
-    Clients that persist duration/ttft can supply generation time directly.
-    """
+def _pi_request_timing(message):
+    """兼容客户端以毫秒记录总耗时和首字等待。"""
     def milliseconds(value):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
@@ -11895,10 +11819,8 @@ def _pi_request_timing(record, message):
     ttft = milliseconds(message.get("ttft"))
     if duration is not None and 0.2 < duration <= _PERF_MAX_SECONDS:
         if ttft is not None and ttft < duration:
-            return duration - ttft, ttft, False
-        return duration, None, True
-    seconds = _pi_stream_seconds(record.get("timestamp"), message.get("timestamp"))
-    return (seconds, None, True) if seconds else None
+            return duration - ttft, ttft
+    return None
 
 
 def _pi_usage_cost(u, model):
@@ -11926,7 +11848,7 @@ def _pi_usage_cost(u, model):
 # 4：附上每条回复的端到端耗时。
 # 5：经网关选路由组时按回包里真正作答的模型归因（responseModel）。
 # 6：优先读取 duration/ttft；标准 Pi 的时间戳差标为含首字等待的端到端速率。
-_PI_PARSER_VERSION = 6
+_PI_PARSER_VERSION = 7
 
 
 def scan_pi(bounds, cache):
@@ -11996,11 +11918,9 @@ def scan_pi(bounds, cache):
                         dk = dt.astimezone().date().isoformat()
                         day = days.setdefault(dk, _empty_token_day())
                         _add_token_usage(day, inp, out, cr, cw, reason, cost, model)
-                        timing = _pi_request_timing(o, msg)
+                        timing = _pi_request_timing(msg)
                         if timing:
-                            seconds, ttft, includes_wait = timing
-                            _perf_add(day.setdefault("perf", {}), model, out, seconds, ttft,
-                                      includes_wait=includes_wait)
+                            _perf_add(day.setdefault("perf", {}), model, out, *timing)
                         day["hours"][dt.astimezone().hour] += inp + out + cr + cw + reason
             except OSError:
                 continue
@@ -12104,17 +12024,13 @@ def _parse_prime_session_file(path):
                 events.append({"key": key, "date": dt.astimezone().date().isoformat(),
                                "hour": dt.astimezone().hour, "in": inp, "out": out,
                                "cr": cr, "cw": cw, "reason": reason, "cost": cost,
-                               "model": current_model,
-                               "gen": _pi_stream_seconds(obj.get("timestamp"),
-                                                         msg.get("timestamp"))})
+                               "model": current_model})
     except OSError:
         return {"session": session_id, "proj": project, "events": [], "days": {}}
     for event in events:
         day = days.setdefault(event["date"], _empty_token_day())
         _add_token_usage(day, event["in"], event["out"], event["cr"], event["cw"],
                          event["reason"], event["cost"], event["model"])
-        if event.get("gen"):
-            _perf_add(day.setdefault("perf", {}), event["model"], event["out"], event["gen"])
         day["hours"][event["hour"]] += token_total(event)
     return {"session": session_id, "sid": session_id, "proj": project,
             "events": events, "days": days, "perf_v": _PRIME_PARSER_VERSION}
@@ -12412,21 +12328,6 @@ def _iter_workbuddy_records(file_cache):
 # requestId 就是会话记录里的 providerData.messageId。两个时长都从发出请求算起。
 _WORKBUDDY_LOG_TTFT = re.compile(r"First meaningful token received: [^\n]*?requestId=([0-9a-f]+), ttft=(\d+)ms")
 _WORKBUDDY_LOG_DONE = re.compile(r"Stream completed: [^\n]*?requestId=([0-9a-f]+),[^\n]*?elapsed=(\d+)ms")
-_WORKBUDDY_TRIGGER = re.compile(
-    r'"type"\s*:\s*"function_call_result"|"role"\s*:\s*"user"')
-_WORKBUDDY_LINE_TIME = re.compile(r'"timestamp"\s*:\s*"?([0-9][0-9T:.+\-Z]*)"?')
-
-
-def _workbuddy_epoch(value):
-    """会话记录的 timestamp：毫秒字符串或 ISO。返回秒。"""
-    text = str(value or "").strip()
-    if text.isdigit():
-        number = int(text)
-        return number / 1000 if number > 10 ** 11 else float(number)
-    dt = parse_ts(text)
-    return dt.timestamp() if dt else None
-
-
 def _workbuddy_log_timing(cache, tool_key, root):
     """requestId → (首字 ms, 流式总耗时 ms)。日志按文件签名缓存，没变的不重读。"""
     log_root = os.path.join(os.path.dirname(root), "logs")
@@ -12492,15 +12393,10 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
         records = []
         project = None
         session_id = os.path.splitext(os.path.basename(path))[0]
-        trigger = None   # 最近一个用户消息 / 工具结果写入的时刻：下一次生成从这里开始
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as fh:
                 for line_no, line in enumerate(fh, 1):
                     if '"usage"' not in line and '"cwd"' not in line:
-                        head = line[:600]
-                        if _WORKBUDDY_TRIGGER.search(head):
-                            stamp = _WORKBUDDY_LINE_TIME.search(head)
-                            trigger = _workbuddy_epoch(stamp.group(1)) if stamp else trigger
                         continue
                     try:
                         item = json.loads(line)
@@ -12508,16 +12404,10 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
                         continue
                     project = item.get("cwd") or project
                     session_id = item.get("sessionId") or session_id
-                    if item.get("type") == "function_call_result" or (
-                            item.get("type") == "message" and item.get("role") == "user"):
-                        trigger = _workbuddy_epoch(item.get("timestamp")) or trigger
                     record = _workbuddy_usage_record(
                         item, model_id_first=tool_key == "codebuddy")
                     if record is None:
                         continue
-                    if trigger is not None and record.get("ts", 0) > trigger:
-                        record["e2e"] = round(record["ts"] - trigger, 3)
-                        trigger = None
                     record_session = str(item.get("sessionId") or session_id)
                     dedup_id = record.get("message_id") or record["item_id"]
                     if tool_key == "codebuddy" and record.get("message_id"):
@@ -12553,13 +12443,13 @@ def _scan_workbuddy_root(bounds, cache, root, tool_key):
         day = days.setdefault(record["date"], _empty_token_day())
         _add_token_usage(day, record["in"], record["out"], record["cr"], record["cw"],
                          0, record["cost"], record["model"], credits=record.get("credits", 0))
-        # 运行日志里有精确的首字和总耗时就用它，日志被清掉了才退回会话记录的端到端
+        # 同一次请求的流式完成耗时减去首字等待。
         timing = log_timing.get(record.get("message_id") or "")
-        sample = ((timing[1] - timing[0]) / 1000, timing[0] / 1000) if timing \
-            else ((record["e2e"], None) if record.get("e2e") else None)
-        if sample:
+        if timing:
+            gen = (timing[1] - timing[0]) / 1000
             for target in (day, ledger_sources[str(identity)][record["date"]]):
-                _perf_add(target.setdefault("perf", {}), record["model"], record["out"], *sample)
+                _perf_add(target.setdefault("perf", {}), record["model"], record["out"],
+                          gen, timing[0] / 1000)
         sessions.setdefault(record["date"], set()).add(record.get("session") or "unknown")
         proj_name = os.path.basename((entry.get("proj") or "").rstrip("/"))
         if proj_name:
@@ -12986,8 +12876,6 @@ def scan_deepseek_harness(bounds, cache):
             if start is not None and first is not None and start <= first <= end:
                 record["gen"] = (end - first) / 1000
                 record["ttft"] = (first - start) / 1000
-            elif start is not None and start < end:
-                record["gen"] = (end - start) / 1000
         records = sorted(candidates.values(), key=lambda record: record["ts"])
         fc[path] = {"sig": sig, "records": records, "proj": project, "sid": session_id,
                     "cost_version": _DEEPSEEK_HARNESS_COST_VERSION}
@@ -13254,7 +13142,7 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
             for gen, ttft, tokens in step_timing.get(message_id, ()):
                 _perf_add(target.setdefault("perf", {}),
                           message.get("modelID") or (message.get("model") or {}).get("id"),
-                          tokens, gen, ttft)
+                          tokens, gen, ttft, measured_generation=True)
             _add_token_usage(target, day["in"], day["out"], day["cr"], day["cw"],
                              day["reason"], day["cost"], cost_cny=day.get("cost_cny", 0))
             for model, usage in day["models"].items():
@@ -13460,10 +13348,6 @@ def _scan_zcode_database(path):
             day = days.setdefault(day_key, _empty_token_day())
             _add_token_usage(day, fresh_input, visible_output, cache_read, cache_write,
                              reasoning, cost, display_model)
-            # 每次调用的起止时刻（毫秒）：端到端速度，含首字等待
-            if number(completed_at) > number(started_at) > 0:
-                _perf_add(day.setdefault("perf", {}), display_model, output_total,
-                          (number(completed_at) - number(started_at)) / 1000)
             day["hours"][created.hour] += fresh_input + output_total + cache_read + cache_write
             sessions.setdefault(day_key, set()).add(str(session_id or row_id or "unknown"))
     finally:
@@ -13721,7 +13605,7 @@ def scan_devin(bounds, cache):
 # 日志会被轮转删掉，所以对上号的结果按行号区间压缩存进扫描缓存（runs），
 # 日志没了模型也不丢；还没等到库里那一行的 turn 暂存在 pending 里。
 # 2：附上回复计时。3：按会话、轮次和 Token 桶逐次匹配，旧计时标注含等待。
-_MINIMAX_SCAN_VERSION = 3
+_MINIMAX_SCAN_VERSION = 4
 # 只更新速率解析时不升级 Token/费用口径，避免覆盖本地数据清理前的账本高水位。
 _MINIMAX_LEDGER_VERSION = 2
 _MINIMAX_LOG_MARKER = b"llm_response_identifiers"
@@ -13854,23 +13738,20 @@ def _minimax_request_timings(connection, tables, rows):
 
     messages, legacy = defaultdict(list), {}
     message_counts = Counter()
-    tool_turns = set()
     try:
         for session_id, turn_id, created_ms, raw in connection.execute("""
                 SELECT session_id, turn_id, created_at_ms,
                        CASE WHEN json_valid(data_json)
-                            THEN json_extract(data_json, '$.usage', '$.tool_calls') END
+                            THEN json_extract(data_json, '$.usage') END
                 FROM local_runtime_message_rows WHERE role = 'assistant'"""):
             if not session_id or not turn_id:
                 continue
             turn = (session_id, turn_id)
             message_counts[turn] += 1
             try:
-                usage, tool_calls = json.loads(raw)
+                usage = json.loads(raw) if raw is not None else {}
             except (TypeError, ValueError):
                 continue
-            if tool_calls:
-                tool_turns.add(turn)
             if usage is None:
                 usage = {}
             if not isinstance(usage, dict):
@@ -13926,23 +13807,15 @@ def _minimax_request_timings(connection, tables, rows):
     for turn, timing in legacy.items():
         if message_counts[turn] == 1 and len(turn_requests[turn]) == 1:
             timings[turn_requests[turn][0][0]] = timing
-    single_requests = {group[0][0] for turn, group in turn_requests.items()
-                       if len(group) == 1 and message_counts[turn] == 1 and turn not in tool_turns}
-    return {row_id: (*timing, row_id in single_requests) for row_id, timing in timings.items()}
+    return timings
 
 
-def _minimax_request_timing(timing, started_ms):
-    end_ms, decode_ms, request_ms, allow_persistence = timing
-    if decode_ms is not None and decode_ms > 0 and (request_ms is None or request_ms >= decode_ms):
-        return (decode_ms / 1000,
-                (request_ms - decode_ms) / 1000 if request_ms is not None else None, False)
-    if request_ms is not None and request_ms > 0:
-        return request_ms / 1000, None, True
-    start = _minimax_perf_ms(started_ms)
-    # completed message 可能等工具执行完才落盘；旧多轮记录无法还原各次模型结束时刻。
-    if allow_persistence and end_ms is not None and start is not None and end_ms > start:
-        return (end_ms - start) / 1000, None, True
-    return None
+def _minimax_request_timing(timing):
+    _, decode_ms, request_ms = timing
+    if decode_ms is None or decode_ms <= 0 or (request_ms is not None and request_ms < decode_ms):
+        return None
+    ttft = (request_ms - decode_ms) / 1000 if request_ms is not None else None
+    return decode_ms / 1000, ttft
 
 
 def _scan_minimax_database(path, pending, runs, through):
@@ -14069,11 +13942,10 @@ def _scan_minimax_database(path, pending, runs, through):
         _add_token_usage(day, inp, out, cache_read, cache_write, reason, cost, display_model)
         timing = request_timings.get(row[0])
         if timing:
-            duration = _minimax_request_timing(timing, ts)
+            duration = _minimax_request_timing(timing)
             if duration:
-                seconds, ttft, includes_wait = duration
                 _perf_add(day.setdefault("perf", {}), display_model, out + reason,
-                          seconds, ttft, includes_wait=includes_wait)
+                          *duration, measured_generation=True)
         project = session_projects.get(session_id)
         if project:
             bucket = day.setdefault("projects", {}).setdefault(
@@ -14328,11 +14200,6 @@ def _qwen_request_entry(record):
         "session": session,
         "models": models,
     }
-    # 这次 API 调用的总耗时：端到端速度，含首字等待
-    duration = _qwen_number(record.get("apiDurationMs"))
-    if duration > 0:
-        entry["gen"] = round(duration / 1000, 3)
-        entry["model"] = model
     return entry
 
 
@@ -14517,11 +14384,6 @@ def scan_qwencode(bounds, cache):
         agg = live_days.setdefault(entry["date"], _empty_token_day())
         _add_token_usage(agg, entry.get("in", 0), entry.get("out", 0), entry.get("cr", 0),
                          entry.get("cw", 0), entry.get("reason", 0), entry.get("cost", 0))
-        if entry.get("gen"):
-            for target in (agg, ledger_sources[str(identity)][entry["date"]]):
-                _perf_add(target.setdefault("perf", {}), entry.get("model"),
-                          int(entry.get("out", 0) or 0) + int(entry.get("reason", 0) or 0),
-                          entry["gen"])
         for model, mv in (entry.get("models") or {}).items():
             _add_model_usage(agg["models"], model, mv.get("in", 0), mv.get("out", 0),
                              mv.get("cr", 0), mv.get("cw", 0), mv.get("reason", 0),
@@ -15821,11 +15683,6 @@ def _scan_muse_session(path):
                     continue
                 day = days.setdefault(dt.date().isoformat(), _empty_token_day())
                 _add_token_usage(day, inp, out, cached, cw, reason, cost, display_model)
-                # 这次模型调用的耗时：端到端速度，含首字等待
-                duration = _muse_number(event.get("duration_ms"))
-                if duration > 0:
-                    _perf_add(day.setdefault("perf", {}), display_model, out + reason,
-                              duration / 1000)
                 day["hours"][dt.hour] += inp + out + cached + cw
     except OSError:
         return {}, sid, proj
@@ -17060,7 +16917,7 @@ def compute(local_only=False):
                 "out": b.get("out", 0), "reason": b.get("reason", 0), "cost": b.get("cost", 0.0),
                 "sessions": len(b.get("sessions", set())),
                 "models": _format_token_models(b.get("models", {}), price_model=_codex_price_model),
-                "perf": _perf_summary(b.get("perf"))}
+                "generation_only": True, "perf": _perf_summary(b.get("perf"))}
 
     def gemini_range(b):
         # tokens.input 含 cached,展示口径与 Codex 一致:输入=非缓存部分
