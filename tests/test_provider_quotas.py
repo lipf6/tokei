@@ -931,6 +931,20 @@ class ProviderQuotaTests(unittest.TestCase):
                 creds = USAGE._discover_antigravity_credentials([{"pid": 456}])
                 self.assertEqual(creds[456], ("proc-token", 50002))
 
+    def test_antigravity_missing_credentials_only_checks_identified_process(self):
+        processes = [{"pid": 123, "csrf_token": "daemon-token"}, {"pid": 456}]
+        for platform in ("darwin", "linux"):
+            with self.subTest(platform=platform), mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(USAGE.sys, "platform", platform), \
+                    mock.patch.object(USAGE, "_IS_WINDOWS", False), \
+                    mock.patch.object(USAGE, "_load_json", return_value={}), \
+                    mock.patch.object(USAGE, "_antigravity_proc_env", return_value={}) as proc_env, \
+                    mock.patch("subprocess.run") as run, mock.patch("glob.glob") as glob:
+                self.assertEqual(USAGE._discover_antigravity_credentials(processes), {})
+                proc_env.assert_called_once_with(456)
+                run.assert_not_called()
+                glob.assert_not_called()
+
     def test_antigravity_endpoints_dual_protocol_and_csrf(self):
         process = {"pid": 999, "csrf_token": "token-xyz", "ls_port": 63041}
         with mock.patch.object(USAGE, "_antigravity_listening_ports", return_value=[63040, 63041]):

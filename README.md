@@ -263,6 +263,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 ### v1.0.52
 
 - 恢复 Antigravity 2.34 的额度读取。macOS 可按 Gemini、Claude/GPT 和独立 Argon 周额度池查看用量、历史轨迹与基于本机会话的容量估算。
+- 移除 agy 从无关进程查找额度凭据的旧兜底。依赖该方式的旧版 CLI 可能无法显示额度。
 - macOS 额度卡片默认遮住账号中间的字符，点击可查看完整账号，关闭面板后恢复打码。
 - 修正 Antigravity Orchestrator 和 Worker 的模型计价，并在模型明细中单列推理用量。
 - Claude Code 补计会话结算中的辅助模型用量，与已记录的消息及子代理用量去重；更新搜索、长提示和 Fable 5.2 Fast 模式计费。

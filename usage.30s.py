@@ -9396,6 +9396,8 @@ def _discover_antigravity_credentials(processes=None):
     discovered = {}
     missing_procs = []
     for proc in (processes or []):
+        if proc.get("csrf_token"):
+            continue
         pid_str = str(proc.get("pid"))
         if pid_str in cached_creds:
             c = cached_creds[pid_str]
@@ -9412,66 +9414,6 @@ def _discover_antigravity_credentials(processes=None):
         if t:
             port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
             discovered[proc["pid"]] = (t, port)
-
-    # 4. 如果还有进程未找到 CSRF token，扫描当前系统上运行的进程环境
-    needed = [p for p in (processes or []) if p["pid"] not in discovered]
-    if needed and not _IS_WINDOWS and sys.platform == "darwin":
-        try:
-            import ctypes, ctypes.util
-            libc = ctypes.CDLL(ctypes.util.find_library("c"))
-            out = subprocess.run(["/bin/ps", "-ax", "-o", "pid="],
-                                 capture_output=True, text=True, timeout=2, check=False).stdout
-            pids = [int(p) for p in out.split() if p.isdigit()]
-            for p in pids:
-                mib = (ctypes.c_int * 3)(1, 49, p)
-                size = ctypes.c_size_t(0)
-                if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
-                    continue
-                buf = ctypes.create_string_buffer(size.value)
-                if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
-                    continue
-                raw = buf.raw
-                if b"ANTIGRAVITY_CSRF_TOKEN=" not in raw:
-                    continue
-                t, a = None, None
-                for part in raw.split(b"\0"):
-                    if part.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
-                        t = part.split(b"=", 1)[1].decode("utf-8", "ignore")
-                    elif part.startswith(b"ANTIGRAVITY_LS_ADDRESS="):
-                        a = part.split(b"=", 1)[1].decode("utf-8", "ignore")
-                if t:
-                    port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
-                    for proc in needed:
-                        discovered[proc["pid"]] = (t, port)
-                    discovered[0] = (t, port)
-                    break
-        except Exception:
-            pass
-    elif needed and not _IS_WINDOWS and sys.platform.startswith("linux"):
-        try:
-            import glob
-            for env_path in glob.glob("/proc/[0-9]*/environ"):
-                try:
-                    with open(env_path, "rb") as f:
-                        raw = f.read()
-                    if b"ANTIGRAVITY_CSRF_TOKEN=" not in raw:
-                        continue
-                    t, a = None, None
-                    for part in raw.split(b"\0"):
-                        if part.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
-                            t = part.split(b"=", 1)[1].decode("utf-8", "ignore")
-                        elif part.startswith(b"ANTIGRAVITY_LS_ADDRESS="):
-                            a = part.split(b"=", 1)[1].decode("utf-8", "ignore")
-                    if t:
-                        port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
-                        for proc in needed:
-                            discovered[proc["pid"]] = (t, port)
-                        discovered[0] = (t, port)
-                        break
-                except (OSError, IOError):
-                    continue
-        except Exception:
-            pass
 
     return discovered
 
