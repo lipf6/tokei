@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# TOKEI_COLLECTOR_REVISION=11
+# TOKEI_COLLECTOR_REVISION=12
 # <bitbar.title>AI Usage Bar</bitbar.title>
 # <bitbar.version>v0.1</bitbar.version>
 # <bitbar.author>local</bitbar.author>
@@ -307,7 +307,7 @@ QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
 PROVIDER_QUOTA_CACHE = _writable_path("provider_quota_cache.json")
 ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
 ANTIGRAVITY_CREDENTIALS_CACHE = _writable_path("antigravity_credentials.json")
-# IDE 会把语言服务器的 pid / 端口 / CSRF 写进 daemon/ls_*.json；CLI 目前不写。
+# IDE 会把语言服务器的 pid / 端口 / CSRF 写进 daemon/ 下的 ls_*.json 或 hub_*.json；CLI 目前不写。
 # 命令行走不通时靠这些文件兜底，读到之后仍要校验 pid 活着、端口真的在听。
 ANTIGRAVITY_DAEMON_DIRS = (
     os.path.join(HOME, ".gemini", "antigravity", "daemon"),
@@ -323,6 +323,7 @@ ANTIGRAVITY_DAEMON_DIRS = (
 # 内置兜底:pricing.json 缺失时仍能离线工作。常用直连模型按官方 API 价，
 # 其余模型由 pricing.json 的 OpenRouter 目录补齐。
 _DEFAULT_PRICES = {
+    "anthropic/claude-fable-5.2":   {"in": 8.0,   "out": 40.0, "cache_read": 0.20,   "cache_write": 10.0},
     "anthropic/claude-fable-5.1":   {"in": 10.0,  "out": 50.0, "cache_read": 0.25,   "cache_write": 12.5, "write1h": 20.0},
     "anthropic/claude-sonnet-5":    {"in": 2.0,   "out": 10.0, "cache_read": 0.2,    "cache_write": 2.5},
     # OpenRouter 目录还没收录 Sonnet 5.5；官方价与 Sonnet 5 相同。收录后以目录为准。
@@ -348,6 +349,12 @@ _DEFAULT_PRICES = {
     "deepseek/deepseek-v4-pro":      {"in": 0.66,  "out": 1.98, "cache_read": 0.022,  "cache_write": 0.0},
     "google/gemini-3.5-flash":       {"in": 1.5,   "out": 9.0,  "cache_read": 0.15,   "cache_write": 0.0833},
     "google/gemini-3.1-pro-preview": {"in": 2.0,   "out": 12.0, "cache_read": 0.2,    "cache_write": 0.375},
+    # Gemini 4 Standard API rates checked 2026-11-17; Carbon/Argon promotional
+    # rates run through November 30. The online catalog supplies later updates.
+    # https://aistudio.google.com/docs/pricing
+    "google/gemini-4-carbon":      {"in": 2.0,   "out": 10.0, "cache_read": 0.1,    "cache_write": 0.0},
+    "google/gemini-4-argon":       {"in": 2.0,   "out": 10.0, "cache_read": 0.1,    "cache_write": 0.0},
+    "google/gemini-4-hydrogen":    {"in": 1.5,   "out": 7.5,  "cache_read": 0.075,  "cache_write": 0.0},
     "x-ai/grok-4.6":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.5,    "cache_write": 0.0},
     "x-ai/grok-4.5":                 {"in": 2.0,   "out": 6.0,  "cache_read": 0.3,    "cache_write": 0.0},
     "tencent/hy3":                   {"in": 0.14,  "out": 0.58, "cache_read": 0.035,  "cache_write": 0.0},
@@ -512,7 +519,18 @@ _BUILTIN_OVERRIDE_MODELS = {
         "in": 4.0, "out": 20.0, "cache_read": 0.4, "cache_write": 5.0,
     },
 }
+_ANTIGRAVITY_MODEL_ALIASES = {
+    # https://antigravity.google/docs/models#orchestrator
+    # The paid Pro planner is Argon; the Ultra planner is Carbon. Both use
+    # Hydrogen for implementation. Preserve the logged role as the display name.
+    "gemini-pro-orchestrator-g1-pro": "google/gemini-4-argon",
+    "gemini-pro-orchestrator-argon": "google/gemini-4-argon",
+    "gemini-pro-orchestrator": "google/gemini-4-carbon",
+    "gemini-flash-worker-agy": "google/gemini-4-hydrogen",
+}
 _BUILTIN_OVERRIDE_ALIASES = {
+    **_ANTIGRAVITY_MODEL_ALIASES,
+    **{f"google/{alias}": model for alias, model in _ANTIGRAVITY_MODEL_ALIASES.items()},
     "gpt-5.6": "openai/gpt-5.6-sol",
     "qwen3.8-max-0902": "qwen/qwen3.8-max",
     "qwen3.8-max-2026-09-02": "qwen/qwen3.8-max",
@@ -552,6 +570,10 @@ _OV_MODELS, _OV_ALIASES = _merge_pricing_overrides(_OVERRIDES)
 _CLAUDE_LONG_PROMPT_TIERS = {
     "anthropic/claude-haiku-5.5": (100_000, 5.0),
 }
+# Anthropic Fast mode doubles Fable 5.2's token rates, including prompt caching.
+_CLAUDE_FAST_PRICE_MULTIPLIERS = {
+    "anthropic/claude-fable-5.2": 2.0,
+}
 
 
 def _effective_pricing_map(catalog=None, overrides=None, official=None):
@@ -570,6 +592,8 @@ def _effective_pricing_map(catalog=None, overrides=None, official=None):
         tier = _CLAUDE_LONG_PROMPT_TIERS.get(model)
         if tier:
             result[model]["long_prompt"] = list(tier)
+        if model in _CLAUDE_FAST_PRICE_MULTIPLIERS:
+            result[model]["fast_multiplier"] = _CLAUDE_FAST_PRICE_MULTIPLIERS[model]
         profile = official.get(model, {}).get("long_context")
         if profile:
             result[model]["long_context"] = profile
@@ -597,6 +621,7 @@ _BUILTIN_REPRICE_MODELS = (
     set(_BUILTIN_OVERRIDE_MODELS)
     | set(_BUILTIN_OVERRIDE_ALIASES)
     | set(_BUILTIN_OVERRIDE_ALIASES.values())
+    | set(_CLAUDE_FAST_PRICE_MULTIPLIERS)
     | {
         "anthropic/claude-fable-5.1", "anthropic/claude-sonnet-5",
         "qwen/qwen3.8-max", "qwen/qwen3.8-27b", "x-ai/grok-4.6",
@@ -746,7 +771,8 @@ def _normalize(model: str):
 
 def _override_alias(model: str):
     value = (model or "").strip()
-    return _OV_ALIASES.get(value) or _OV_ALIASES.get(value.lower())
+    return (_OV_ALIASES.get(value) or _OV_ALIASES.get(value.lower())
+            or _OV_ALIASES.get(_normalize(value)))
 
 
 def _resolve_id(model: str):
@@ -2090,6 +2116,34 @@ def _sqlite_ro_uri(path):
     return Path(path).resolve().as_uri() + "?mode=ro"
 
 
+def _sqlite_open_readonly(path, timeout=5.0, module=None):
+    """只读打开 SQLite 库，WAL 库被写方 checkpoint 清掉侧车后仍可打开。
+
+    工具干净退出（如 ZCode）会 checkpoint 并删除 -wal/-shm 侧车，但主库文件头仍是
+    WAL 模式，mode=ro 连接重建 wal-index 需要写权限，会直接 OperationalError。
+    此时主库文件已包含全部已提交行，降级 immutable=1 绕过 wal-index 即可打开；
+    侧车仍存在且非空时保持普通只读连接——immutable 会忽略 WAL，读到旧数据。
+    """
+    module = module or sqlite3
+    uri = _sqlite_ro_uri(path)
+    connection = None
+    try:
+        connection = module.connect(uri, uri=True, timeout=timeout)
+        # 常量 SELECT 不访问主库，须读 schema 才能发现 WAL 索引无法打开。
+        connection.execute("PRAGMA schema_version").fetchone()
+        return connection
+    except module.OperationalError:
+        if connection is not None:
+            connection.close()
+        try:
+            has_pending_wal = os.path.getsize(str(path) + "-wal") > 0
+        except FileNotFoundError:
+            has_pending_wal = False
+        if has_pending_wal:
+            raise
+        return module.connect(uri + "&immutable=1", uri=True, timeout=timeout)
+
+
 def _sqlite_signature(path):
     parts = []
     # SHM 的 mtime 会被只读 SQLite 连接更新，不能作为数据变化信号。
@@ -2396,8 +2450,13 @@ def _safe_scan(name, fn, fallback, errors):
 
 
 # ---------- Claude Code ----------
+# Claude Code 的网页搜索按 $10 / 1,000 次计费。
+_CLAUDE_WEB_SEARCH_USD = 0.01
+
+
 def _claude_event_cost(event):
-    p = price_for(event.get("model"))
+    model = event.get("model")
+    p = price_for(model)
     inp = int(event.get("in", 0) or 0)
     out = int(event.get("out", 0) or 0)
     cr = int(event.get("cr", 0) or 0)
@@ -2411,10 +2470,12 @@ def _claude_event_cost(event):
                       + int(w1 or 0) / 1e6 * p["write1h"])
     cost = (inp / 1e6 * p["in"] + out / 1e6 * p["out"]
             + cr / 1e6 * p["cache_read"] + write_cost)
-    tier = _CLAUDE_LONG_PROMPT_TIERS.get(_resolve_id(event.get("model")))
-    if tier and inp + cr + cw > tier[0]:
+    tier = _CLAUDE_LONG_PROMPT_TIERS.get(_resolve_id(model))
+    if tier and not event.get("side") and inp + cr + cw > tier[0]:
         cost *= tier[1]
-    return cost
+    if event.get("fast") is True:
+        cost *= _CLAUDE_FAST_PRICE_MULTIPLIERS.get(_model_identity_id(model), 1.0)
+    return cost + int(event.get("ws") or 0) * _CLAUDE_WEB_SEARCH_USD
 
 
 def _reprice_claude_events(file_cache, changed_models):
@@ -2446,7 +2507,11 @@ def _prefer_claude_event(candidate, existing):
     existing_total = _claude_event_total(existing)
     if candidate_total != existing_total:
         return candidate_total > existing_total
-    return float(candidate.get("cost", 0) or 0) > float(existing.get("cost", 0) or 0)
+    candidate_cost = float(candidate.get("cost", 0) or 0)
+    existing_cost = float(existing.get("cost", 0) or 0)
+    if candidate_cost != existing_cost:
+        return candidate_cost > existing_cost
+    return candidate.get("wf", 0) > existing.get("wf", 0)
 
 
 def _dedupe_claude_events(file_events):
@@ -2488,9 +2553,120 @@ def _dedupe_claude_events(file_events):
     return selected
 
 
+_CLAUDE_SIDE_FIELDS = ("in", "out", "cr", "cw", "cw5", "cw1", "ws")
+
+
+def _claude_subagent_parent(path):
+    """<项目>/<会话ID>/subagents/agent-*.jsonl → <项目>/<会话ID>.jsonl；不是子代理文件返回 None。"""
+    folder = os.path.dirname(path)
+    if os.path.basename(folder) != "subagents":
+        return None
+    return os.path.dirname(folder) + ".jsonl"
+
+
+def _claude_side_events(path, entry, sub_events=()):
+    """把会话的 cost-state 行换算成侧调用事件。
+
+    Claude Code 只把主对话的回复写成 assistant 消息。Haiku 替主模型搜索、读网页，主模型压缩上下文
+    这类调用不落成消息，用量只出现在会话结束时写的 cost-state 行里：按模型累计，续聊时从上一行恢复后
+    接着累加。逐段计算：本段增量 = 这一行 − 上一行（有数回落说明没有恢复、重新计数，整行就是本段），
+    减去本段里已经按消息记过的用量（含同会话子代理文件里同一时段的消息），剩下的记成一条侧调用事件，
+    时间取本段最后读到的时刻。账本沿用同一份日志的来源标识，重扫不会重复入账。"""
+    states = sorted((s for s in entry.get("costs") or [] if isinstance(s, dict)),
+                    key=lambda s: s.get("line", 0))
+    if not states:
+        return []
+    own = [e for e in entry.get("events", []) if isinstance(e, dict)]
+    timed_subs = []
+    for e in sub_events:
+        dt = parse_ts(e.get("timestamp", ""))
+        if dt is not None:
+            timed_subs.append((dt.timestamp(), e))
+    name = os.path.basename(path)
+    result = []
+    prev, prev_line, prev_at = {}, 0, None
+    for state in states:
+        line, at = state.get("line", 0), state.get("at")
+        usage = state.get("usage") or {}
+        restart = any(
+            int((usage.get(model) or {}).get(key, 0)) < int(before.get(key, 0))
+            for model, before in prev.items() for key in _CLAUDE_SIDE_FIELDS)
+        base = {} if restart else prev
+        segment = [e for e in own if prev_line < e.get("line", 0) < line]
+        if at is not None:
+            segment += [e for t, e in timed_subs if (prev_at is None or t > prev_at) and t <= at]
+        logged = {}
+        for _, e in _dedupe_claude_events((path, e) for e in segment):
+            total = logged.setdefault(e.get("model") or "unknown",
+                                      dict.fromkeys(_CLAUDE_SIDE_FIELDS, 0))
+            for key in _CLAUDE_SIDE_FIELDS:
+                total[key] += int(e.get(key) or 0)
+            total["cost"] = total.get("cost", 0.0) + e["cost"]
+        for model, now in usage.items():
+            before = base.get(model) or {}
+            spent = {key: int(now.get(key, 0)) - int(before.get(key, 0))
+                     for key in _CLAUDE_SIDE_FIELDS}
+            done = logged.get(model) or {}
+            side = {key: max(0, spent[key] - int(done.get(key, 0)))
+                    for key in ("in", "out", "cr", "cw", "ws")}
+            if at is None or not any(side.values()):
+                continue
+            event = {key: side[key] for key in ("in", "out", "cr", "cw")}
+            # 先扣掉已知的消息缓存档位。剩余用量缺少档位时，未分类部分按 5m 计价。
+            w5 = max(0, spent["cw5"] - done.get("cw5", 0))
+            w1 = max(0, spent["cw1"] - done.get("cw1", 0))
+            if w5 + w1 > 0 and event["cw"]:
+                # 消息未记录档位时，两档剩余量可能超过实际剩余总量。
+                event["cw1"] = (round(event["cw"] * w1 / (w5 + w1))
+                                if w5 + w1 > event["cw"] else w1)
+                event["cw5"] = event["cw"] - event["cw1"]
+            else:
+                event["cw5"] = event["cw1"] = None
+            event.update({
+                "model": model, "ws": side["ws"], "cwd": None, "mid": None, "request_id": None,
+                "event_id": f"cost-state:{name}:{line}:{model}", "sidechain": False, "side": True,
+                "timestamp": datetime.fromtimestamp(at, timezone.utc).isoformat(), "line": line})
+            event["cost"] = _claude_event_cost(event)
+            # 长提示门槛按单次请求判断。会话汇总只提供合计，用 CLI 的
+            # 分模型成本差补足可能的分档费用，缺少可信差值时沿用基础价。
+            if _resolve_id(model) in _CLAUDE_LONG_PROMPT_TIERS:
+                latest_cost = now.get("cost_usd")
+                previous_cost = before.get("cost_usd") if before else 0.0
+                if latest_cost is not None and previous_cost is not None:
+                    remaining_cost = latest_cost - previous_cost - done.get("cost", 0.0)
+                    if remaining_cost >= event["cost"] - 1e-9:
+                        event["cost"] = max(event["cost"], remaining_cost)
+            result.append(event)
+        prev, prev_line, prev_at = usage, line, at
+    return result
+
+
+def _claude_events_with_side(file_cache):
+    """[(路径, 事件)]：各文件的消息事件，加上由 cost-state 换算出的侧调用事件（记在主会话文件名下）。"""
+    subs = {}
+    for path, entry in file_cache.items():
+        parent = _claude_subagent_parent(path)
+        if parent and isinstance(entry, dict):
+            subs.setdefault(parent, []).extend(
+                e for e in entry.get("events", []) if isinstance(e, dict))
+    pairs = []
+    for path, entry in file_cache.items():
+        if not isinstance(entry, dict):
+            continue
+        for event in entry.get("events", []):
+            pairs.append((path, event))
+        for event in _claude_side_events(path, entry, subs.get(path, ())):
+            pairs.append((path, event))
+    return pairs
+
+
 # 1：每个请求附上计时（生成秒数、首字延迟），升级后整份重扫一次补上历史。
 # 2：请求起点沿父链跳过附件行，找到真正触发请求的用户消息或工具结果。
-_CLAUDE_PERF_VERSION = 3
+# 3：记下会话结束时写入的 cost-state 行，补上未写成消息的侧调用用量。
+# 4：缓存分模型成本快照，并把已记录的搜索费计入消息成本。
+# 5：保留消息中明确归属到模型的 WebFetch 次数。
+# 6：读取消息实际使用的 Fast 模式，以便对 Fable 5.2 分开计价。
+_CLAUDE_PERF_VERSION = 6
 # 顶层的 uuid 和 timestamp 紧挨着，正文里的引号都是转义过的，所以这个模式只会命中顶层字段。
 # 用它取用户消息、工具结果这些行的写入时间，不必整行解析大段的工具输出。
 _CLAUDE_LINE_TIME = re.compile(r'"uuid"\s*:\s*"([0-9a-f-]{36})"\s*,\s*"timestamp"\s*:\s*"([^"]+)"')
@@ -2526,19 +2702,58 @@ _CLAUDE_USER_LINE = re.compile(
     r'(?:"\w+":(?:"[^"\\]*"|true|false|null|-?\d+),)*?"type":"user"')
 
 
-def _claude_parse_lines(handle, offset, line_number, events, when, via):
+def _claude_cost_state(line, line_number, at):
+    """会话结束时的 cost-state 行 → {line, at, usage: {模型: 累计用量}}；不是就返回 None。"""
+    try:
+        o = json.loads(line)
+    except Exception:
+        return None
+    usage = o.get("modelUsage") if isinstance(o, dict) and o.get("type") == "cost-state" else None
+    if not isinstance(usage, dict):
+        return None
+    models = {}
+    for model, u in usage.items():
+        if not isinstance(u, dict):
+            continue
+        try:
+            model_usage = {
+                key: int(u.get(field) or 0) for key, field in (
+                    ("in", "inputTokens"), ("out", "outputTokens"),
+                    ("cr", "cacheReadInputTokens"), ("cw", "cacheCreationInputTokens"),
+                    ("cw5", "cacheCreationEphemeral5mInputTokens"),
+                    ("cw1", "cacheCreationEphemeral1hInputTokens"),
+                    ("ws", "webSearchRequests"))}
+        except (TypeError, ValueError, OverflowError):
+            return None
+        cost = u.get("costUSD")
+        if (not o.get("hasUnknownModelCost") and isinstance(cost, (int, float))
+                and not isinstance(cost, bool) and 0 <= cost < math.inf):
+            model_usage["cost_usd"] = cost
+        models[model] = model_usage
+    return {"line": line_number, "at": at, "usage": models}
+
+
+def _claude_parse_lines(handle, offset, line_number, events, when, via, costs=None):
     """从二进制句柄当前位置往下逐行解析，和以前按文本整份读一样处理每一行（包括没写完的
     最后一行）；切点只取写完整的用户消息行，切点之后的内容下一轮总会重新解析。
+    costs 收集 cost-state 行；它本身没有时间戳，取此前读到的最晚时刻作为写入时刻。
 
     返回 (项目目录, 切点, 读到的字节偏移)；切点是最后一条用户消息行的 [偏移, 行号, 指纹]。"""
     proj = None
     cut = None
+    last_at = None
     for raw in handle:
         line_number += 1
         line = raw.decode("utf-8", "ignore")
         if raw.endswith(b"\n") and _CLAUDE_USER_LINE.match(line):
             cut = [offset, line_number, hashlib.sha1(raw).hexdigest()[:16]]
         offset += len(raw)
+        if costs is not None and '"cost-state"' in line and raw.endswith(b"\n"):
+            seen = [t for t in (last_at, max(when.values()) if when else None) if t is not None]
+            state = _claude_cost_state(line, line_number, max(seen) if seen else None)
+            if state:
+                costs.append(state)
+                continue
         if '"usage"' not in line:
             _claude_note_time(when, line, via)
             continue
@@ -2548,23 +2763,29 @@ def _claude_parse_lines(handle, offset, line_number, events, when, via):
             continue
         if u.get("event_id"):
             when[u["event_id"]] = u["dt"].timestamp()
-        events.append({
+        last_at = u["dt"].timestamp() if last_at is None else max(last_at, u["dt"].timestamp())
+        event = {
             "in": u["in"], "out": u["out"], "cr": u["cr"], "cw": u["cw"],
-            "cw5": u.get("cw5"), "cw1": u.get("cw1"),
+            "cw5": u.get("cw5"), "cw1": u.get("cw1"), "ws": u.get("ws", 0),
             "cost": u["cost"], "model": u.get("model") or "unknown",
             "cwd": u.get("cwd"), "mid": u.get("mid"),
             "request_id": u.get("request_id"), "event_id": u.get("event_id"),
             "sidechain": bool(u.get("sidechain")), "timestamp": u["dt"].isoformat(),
             "line": line_number,
             "parent": u.get("parent"), "think_ms": u.get("think_ms"),
-        })
+        }
+        if u["wf"]:
+            event["wf"] = u["wf"]
+        if u.get("fast"):
+            event["fast"] = True
+        events.append(event)
         if proj is None and u.get("cwd"):
             proj = u["cwd"]
     return proj, cut, offset
 
 
 def _claude_parse_file(path, entry, size):
-    """(事件, 项目目录, 切点, 已解析到的偏移)；能从上次的切点续读就续读。"""
+    """(事件, 项目目录, 切点, 已解析到的偏移, cost-state 行)；能从上次的切点续读就续读。"""
     cut = entry.get("cut") if isinstance(entry, dict) else None
     with open(path, "rb") as handle:
         if (cut and entry.get("perf_v") == _CLAUDE_PERF_VERSION
@@ -2572,17 +2793,20 @@ def _claude_parse_file(path, entry, size):
             handle.seek(cut[0])
             if hashlib.sha1(handle.readline()).hexdigest()[:16] == cut[2]:
                 handle.seek(cut[0])
-                events, when, via = [], {}, {}
+                events, when, via, costs = [], {}, {}, []
                 proj, new_cut, end = _claude_parse_lines(handle, cut[0], cut[1] - 1,
-                                                         events, when, via)
+                                                         events, when, via, costs)
                 _claude_attach_perf(events, when, via)
                 kept = [event for event in entry.get("events", []) if event.get("line", 0) < cut[1]]
-                return kept + events, entry.get("proj") or proj, new_cut or cut, end
+                kept_costs = [state for state in entry.get("costs") or []
+                              if isinstance(state, dict) and state.get("line", 0) < cut[1]]
+                return (kept + events, entry.get("proj") or proj, new_cut or cut, end,
+                        kept_costs + costs)
             handle.seek(0)
-        events, when, via = [], {}, {}
-        proj, cut, end = _claude_parse_lines(handle, 0, 0, events, when, via)
+        events, when, via, costs = [], {}, {}, []
+        proj, cut, end = _claude_parse_lines(handle, 0, 0, events, when, via, costs)
         _claude_attach_perf(events, when, via)
-        return events, proj, cut, end
+        return events, proj, cut, end, costs
 
 
 def _claude_request_start(parent, when, via):
@@ -2636,6 +2860,14 @@ def _claude_attach_perf(events, when, via=None):
         event.pop("think_ms", None)
 
 
+def _merge_claude_model(models, name, usage):
+    model = models.setdefault(name, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
+    for key in ("in", "out", "cr", "cw", "cost", "ws", "wf"):
+        value = usage.get(key, 0)
+        if value:
+            model[key] = model.get(key, 0) + value
+
+
 def scan_claude(bounds, cache):
     fc = cache.setdefault("claude", {})
     changed = False
@@ -2673,15 +2905,21 @@ def scan_claude(bounds, cache):
             cur_file = f
         sig = f"{mtime}:{size}"
         entry = fc.get(f)
+        # v5 里只有含 Fable 5.2 的文件需要重新读取原日志，补出请求的 Fast 状态。
+        if (entry and entry.get("perf_v") == 5
+                and not _cached_entry_has_pricing_change(
+                    {"events": entry.get("events")}, _CLAUDE_FAST_PRICE_MULTIPLIERS)):
+            entry["perf_v"] = 6
+            changed = True
         if (not entry or entry.get("sig") != sig
                 or entry.get("perf_v") != _CLAUDE_PERF_VERSION):
             try:
-                events, proj, cut, end = _claude_parse_file(f, entry, size)
+                events, proj, cut, end, costs = _claude_parse_file(f, entry, size)
             except OSError:
                 continue
             events = [event for _, event in _dedupe_claude_events((f, item) for item in events)]
             fc[f] = {"sig": sig, "events": events, "proj": proj, "perf_v": _CLAUDE_PERF_VERSION,
-                     "cut": cut, "end": end}
+                     "cut": cut, "end": end, "costs": costs}
             changed = True
 
     for p in stale:
@@ -2691,11 +2929,7 @@ def scan_claude(bounds, cache):
     # 文件签名、repricing、stale 清理都没置 changed 时,缓存事件的天级聚合
     # 与上一轮一致,跳过重聚合(dedupe + 逐事件聚合是本函数的主要开销)。
     if changed:
-        all_events = []
-        for path, entry in fc.items():
-            for event in entry.get("events", []):
-                all_events.append((path, event))
-        selected_events = _dedupe_claude_events(all_events)
+        selected_events = _dedupe_claude_events(_claude_events_with_side(fc))
 
         aggregates = {
             path: {"days": {}, "hours": [0] * 24, "day_hours": {}, "dh": set(),
@@ -2717,11 +2951,7 @@ def scan_claude(bounds, cache):
             day["cr"] += event["cr"]; day["cw"] += event["cw"]
             day["cost"] += event["cost"]
             model = event.get("model") or "unknown"
-            model_usage = day["models"].setdefault(
-                model, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
-            model_usage["in"] += event["in"]; model_usage["out"] += event["out"]
-            model_usage["cr"] += event["cr"]; model_usage["cw"] += event["cw"]
-            model_usage["cost"] += event["cost"]
+            _merge_claude_model(day["models"], model, event)
             timing = event.get("perf")
             if timing:
                 _perf_add(day.setdefault("perf", {}), model, event["out"], timing[0],
@@ -2767,10 +2997,8 @@ def scan_claude(bounds, cache):
             agg["cr"] += day["cr"]; agg["cw"] += day["cw"]; agg["cost"] += day["cost"]
             if proj_name:
                 day_projects.setdefault(dk, set()).add(proj_name)
-            for mn, mv in day["models"].items():
-                mm = agg["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
-                mm["in"] += mv["in"]; mm["out"] += mv["out"]
-                mm["cr"] += mv["cr"]; mm["cw"] += mv["cw"]; mm["cost"] += mv["cost"]
+            for name, model_usage in day["models"].items():
+                _merge_claude_model(agg["models"], name, model_usage)
             if day.get("perf"):
                 _perf_merge(agg.setdefault("perf", {}), day["perf"])
             # 会话数只能来自现存日志(被清日志无从归属)
@@ -2796,11 +3024,8 @@ def scan_claude(bounds, cache):
             b["in"] += day.get("in", 0); b["out"] += day.get("out", 0)
             b["cr"] += day.get("cr", 0); b["cw"] += day.get("cw", 0)
             b["cost"] += day.get("cost", 0.0)
-            for mn, mv in (day.get("models") or {}).items():
-                mm = b["models"].setdefault(mn, {"in": 0, "out": 0, "cr": 0, "cw": 0, "cost": 0.0})
-                mm["in"] += mv.get("in", 0); mm["out"] += mv.get("out", 0)
-                mm["cr"] += mv.get("cr", 0); mm["cw"] += mv.get("cw", 0)
-                mm["cost"] += mv.get("cost", 0.0)
+            for name, model_usage in (day.get("models") or {}).items():
+                _merge_claude_model(b["models"], name, model_usage)
             if day.get("perf"):
                 _perf_merge(b.setdefault("perf", {}), day["perf"])
 
@@ -2845,11 +3070,20 @@ def _claude_usage(line, want_dt=False):
     cc = u.get("cache_creation") or {}
     w5 = cc.get("ephemeral_5m_input_tokens")
     w1 = cc.get("ephemeral_1h_input_tokens")
+    server_tools = u.get("server_tool_use")
+    if not isinstance(server_tools, dict):
+        server_tools = {}
+    searches = server_tools.get("web_search_requests")
+    fetches = server_tools.get("web_fetch_requests")
     res = {"in": inp, "out": out, "cr": cr, "cw": cw, "cw5": w5, "cw1": w1,
+           "ws": searches if type(searches) is int and searches > 0 else 0,
+           "wf": fetches if type(fetches) is int and fetches > 0 else 0,
            "model": msg.get("model"), "cwd": o.get("cwd"), "mid": msg.get("id"),
            "request_id": o.get("requestId") or o.get("request_id"),
            "event_id": o.get("uuid"), "sidechain": o.get("isSidechain") is True,
            "parent": o.get("parentUuid"), "think_ms": o.get("thinkingDurationMs")}
+    if u.get("speed") == "fast":
+        res["fast"] = True
     res["cost"] = _claude_event_cost(res)
     if want_dt:
         res["dt"] = dt
@@ -5666,7 +5900,7 @@ def _load_antigravity_db(path):
     max_ts = ""
     conn = None
     try:
-        conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+        conn = _sqlite_open_readonly(path, timeout=1)
         rows = conn.execute("SELECT idx, data FROM gen_metadata ORDER BY idx ASC").fetchall()
         try:
             step_rows = conn.execute("SELECT idx, metadata FROM steps").fetchall()
@@ -5836,13 +6070,50 @@ def _load_gemini_usage_file(path):
 # 3：TTFT 改存细分桶直方图，取中位数。
 # 账本按「取大」合并，修正后更小的数要靠版本号才能替换掉旧记录。
 _GEMINI_PARSE_VERSION = 3
+# Pricing migration is independent of token parsing: existing source DBs may
+# contain only part of a retained day and must not replace its historical total.
+_ANTIGRAVITY_ROLE_PRICING_VERSION = 1
+
+
+def _gemini_event_cost(model, inp, out, cached, thoughts):
+    price = gemini_price(model)
+    return (max(inp - cached, 0) * price["in"]
+            + cached * price["cache_read"]
+            + (out + thoughts) * price["out"]) / 1e6
+
+
+def _reprice_antigravity_ledger():
+    """Correct retained role-model costs even when the source DB was removed."""
+    changed_days = []
+    for dk, day in _load_ledger().get("tools", {}).get("gemini", {}).items():
+        if day.get("_role_pricing_version", 0) >= _ANTIGRAVITY_ROLE_PRICING_VERSION:
+            continue
+        delta = 0.0
+        matched = False
+        for model, usage in (day.get("models") or {}).items():
+            normalized = _normalize(model)
+            if not normalized or normalized.removeprefix("google/") not in _ANTIGRAVITY_MODEL_ALIASES:
+                continue
+            cost = _gemini_event_cost(model, usage.get("in", 0), usage.get("out", 0),
+                                      usage.get("cached", 0), usage.get("thoughts", 0))
+            delta += cost - usage.get("cost", 0)
+            usage["cost"] = cost
+            matched = True
+        if matched:
+            day["cost"] = max(day.get("cost", 0) + delta, 0.0)
+            day["_role_pricing_version"] = _ANTIGRAVITY_ROLE_PRICING_VERSION
+            changed_days.append(dk)
+    if changed_days:
+        _ledger_mark_dirty(changed_days)
 
 
 def scan_gemini(bounds, cache):
+    _reprice_antigravity_ledger()
     ledger_touch("gemini")
     fc = cache.setdefault("gemini", {})
     files = _gemini_session_files()
     if not files:
+        _remember_antigravity_quota_usage(fc)
         if fc:
             fc.clear()
             cache["_dirty"] = True
@@ -5870,6 +6141,7 @@ def scan_gemini(bounds, cache):
         fc[path] = parsed
         cache["_dirty"] = True
 
+    _remember_antigravity_quota_usage(fc)
     for path in stale:
         fc.pop(path, None)
         cache["_dirty"] = True
@@ -5895,15 +6167,13 @@ def scan_gemini(bounds, cache):
             out = int(tokens.get("output", 0) or 0)
             cached = int(tokens.get("cached", 0) or 0)
             thoughts = int(tokens.get("thoughts", 0) or 0)
-            price = gemini_price(model)
-            cost = (max(inp - cached, 0) / 1e6 * price["in"]
-                    + cached / 1e6 * price["cache_read"]
-                    + (out + thoughts) / 1e6 * price["out"])
+            cost = _gemini_event_cost(model, inp, out, cached, thoughts)
             day_key = dt.date().isoformat()
             day = days.setdefault(
                 day_key, {"in": 0, "out": 0, "cached": 0, "thoughts": 0,
                           "cost": 0.0, "models": {}, "sessions": set(), "hours": [0] * 24,
-                          "_ledger_version": _GEMINI_PARSE_VERSION})
+                          "_ledger_version": _GEMINI_PARSE_VERSION,
+                          "_role_pricing_version": _ANTIGRAVITY_ROLE_PRICING_VERSION})
             timing = event.get("timing")
             if timing:
                 _perf_add(day.setdefault("perf", {}), model, out, timing[1], timing[0])
@@ -7368,7 +7638,7 @@ def _cursor_app_session(path=None, now_epoch=None):
     if not db_path or not os.path.isfile(db_path):
         return None
     try:
-        connection = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True, timeout=0.25)
+        connection = _sqlite_open_readonly(db_path, timeout=0.25)
         row = connection.execute(
             "SELECT value FROM ItemTable WHERE key = ? LIMIT 1",
             ("cursorAuth/accessToken",)).fetchone()
@@ -9246,7 +9516,8 @@ def _antigravity_daemon_credentials():
     """IDE 的 daemon 发现文件里有 pid/端口/CSRF;命令行拿不到 token 时用它兜底。"""
     found = []
     for directory in ANTIGRAVITY_DAEMON_DIRS:
-        for path in glob.glob(os.path.join(directory, "ls_*.json")):
+        for path in (glob.glob(os.path.join(directory, "ls_*.json"))
+                     + glob.glob(os.path.join(directory, "hub_*.json"))):
             data = _load_json(path, {})
             if not isinstance(data, dict):
                 continue
@@ -9680,7 +9951,7 @@ def _devin_plan(db_path):
     rows = []
     conn = None
     try:
-        conn = _sq.connect(_sqlite_ro_uri(db_path), uri=True, timeout=1)
+        conn = _sqlite_open_readonly(db_path, timeout=1)
         conn.execute("PRAGMA query_only=ON")
         for pattern in _DEVIN_PLAN_KEY_PATTERNS:
             found = list(conn.execute(
@@ -10162,7 +10433,7 @@ def scan_qoder(bounds, cache):
         if sig and (not entry or entry.get("sig") != sig):
             conn = None
             try:
-                conn = _sqlite3.connect(_sqlite_ro_uri(qoder_db), uri=True, timeout=1)
+                conn = _sqlite_open_readonly(qoder_db, timeout=1)
                 conn.execute("PRAGMA query_only=ON")
                 # messages: calls, sessions, tokens, duration, turns
                 # 只统计 assistant 行:user 行也可能带 metadata,会虚增任务数
@@ -10326,7 +10597,7 @@ def scan_qoder_ide(bounds, cache):
         latest_model = None
         conn = None
         try:
-            conn = _sq.connect(_sqlite_ro_uri(qoder_ide_db), uri=True, timeout=1)
+            conn = _sqlite_open_readonly(qoder_ide_db, timeout=1)
             conn.execute("PRAGMA query_only=ON")
             # token 用量 & 计数 per day
             for row in conn.execute("""
@@ -10463,7 +10734,7 @@ def _hermes_db_paths():
 def _scan_hermes_db(db_path, _sq):
     days = {}
     try:
-        conn = _sq.connect(_sqlite_ro_uri(db_path), uri=True)
+        conn = _sqlite_open_readonly(db_path, module=_sq)
         conn.row_factory = _sq.Row
 
         tables = {row[0] for row in conn.execute(
@@ -11125,7 +11396,7 @@ def _openclaw_db_paths():
 
 
 def _openclaw_connect(db_path, sqlite_module):
-    conn = sqlite_module.connect(_sqlite_ro_uri(db_path), uri=True, timeout=1)
+    conn = _sqlite_open_readonly(db_path, timeout=1, module=sqlite_module)
     conn.execute("PRAGMA query_only=ON")
     return conn
 
@@ -13104,7 +13375,7 @@ def _scan_opencode_database(path, estimate_missing_cost=False):
     days = {}
     message_ids = set()
     sessions = {}
-    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    connection = _sqlite_open_readonly(path, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
         tables = {row[0] for row in connection.execute(
@@ -13308,7 +13579,7 @@ def _scan_zcode_database(path):
 
     days = {}
     sessions = {}
-    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    connection = _sqlite_open_readonly(path, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
         rows = connection.execute("""
@@ -13424,7 +13695,7 @@ def _scan_devin_cli_database(path):
     days = {}
     sessions = {}
     seen = set()
-    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    connection = _sqlite_open_readonly(path, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
         tables = {row[0] for row in connection.execute(
@@ -13828,7 +14099,7 @@ def _scan_minimax_database(path, pending, runs, through):
         except (TypeError, ValueError, OverflowError):
             return 0
 
-    connection = sqlite3.connect(_sqlite_ro_uri(path), uri=True, timeout=1)
+    connection = _sqlite_open_readonly(path, timeout=1)
     try:
         connection.execute("PRAGMA query_only=ON")
         # 运行中的客户端会继续写入；用量和消息必须读自同一份数据库快照。
@@ -16903,9 +17174,14 @@ def compute(local_only=False):
         models = []
         for n, v in sorted(b["models"].items(), key=lambda kv: -kv[1]["cost"]):
             p = price_for(n)
-            models.append({"name": nice_model(n), "in": v["in"], "out": v["out"],
-                           "cr": v["cr"], "cw": v["cw"], "cost": v["cost"],
-                           "pin": p["in"], "pout": p["out"], "pcr": p["cache_read"]})
+            model = {"name": nice_model(n), "in": v["in"], "out": v["out"],
+                     "cr": v["cr"], "cw": v["cw"], "cost": v["cost"],
+                     "pin": p["in"], "pout": p["out"], "pcr": p["cache_read"]}
+            if v.get("ws", 0) > 0:
+                model["web_searches"] = v["ws"]
+            if v.get("wf", 0) > 0:
+                model["web_fetches"] = v["wf"]
+            models.append(model)
         return {"hit": hit, "in": b["in"], "out": b["out"],
                 "cr": b["cr"], "cw": b["cw"], "cost": b["cost"], "models": models,
                 "sessions": len(b["sessions"]), "perf": _perf_summary(b.get("perf"), name=nice_model)}
@@ -17493,8 +17769,10 @@ def write_sync_snapshot():
         d["_ledger"] = ledger
     # 周期边界推不出来,只有观测到的那台机器知道 —— 不发布,别的机器就永远补不齐历史。
     anchors = _load_quota_anchors()
-    if anchors:
-        d["_quota_anchors"] = anchors
+    # 仅共享已有跨设备周期工具的边界，Antigravity 的分池读数只在本机使用。
+    shared = {tool: anchors[tool] for tool, _ in _QUOTA_TOOLS if anchors.get(tool)}
+    if shared:
+        d["_quota_anchors"] = shared
     return 0 if _write_configured_sync_snapshot(d) else 1
 
 
@@ -19433,11 +19711,197 @@ _QUOTA_WEEK_HOURS = 7 * 24
 _QUOTA_SELF_DEVICE = "本机"
 _QUOTA_ANCHOR_FILE = os.path.join(HOME, ".tokei", "quota_cycles.json")
 _QUOTA_HISTORY_FILE = os.path.join(HOME, ".tokei", "quota_history.json")
+_ANTIGRAVITY_QUOTA_USAGE_FILE = os.path.join(HOME, ".tokei", "antigravity_quota_usage.json")
+_ANTIGRAVITY_QUOTA_USAGE_LOCK = threading.Lock()
 # resets_in_seconds 是整秒截断的,同一个锚点读出来会有几秒抖动。
 _QUOTA_ANCHOR_JITTER = 120
 _QUOTA_CYCLE_MIN_USED_PCT = 2
 # 有额度周期的三个工具 → 日表里的短键。
 _QUOTA_TOOLS = (("claude", "c"), ("codex", "x"), ("grok", "g"))
+
+
+def _antigravity_cycle_windows():
+    return [("antigravity-" + key, title, "week")
+            for key, title, minutes in (*_ANTIGRAVITY_QUOTA_WINDOWS,
+                                       ("gemini-argon-weekly", "Gemini 4 Argon 周", 10080))
+            if minutes == 10080]
+
+
+def _quota_antigravity_readings(payload, now):
+    quota = (payload or {}).get("antigravity") or {}
+    if not quota.get("available") or quota.get("stale"):
+        return {}
+    known = {key: 7 * 86400
+             for key, _title, window in _antigravity_cycle_windows()}
+    readings = {}
+    for row in quota.get("windows") or []:
+        if not isinstance(row, dict) or row.get("id") not in known or row.get("usage_known") is False:
+            continue
+        used, reset = row.get("used_pct"), row.get("reset")
+        if (type(used) not in (int, float) or not math.isfinite(used) or not 0 <= used <= 100
+                or type(reset) not in (int, float) or not math.isfinite(reset)
+                or reset <= now or reset > now + known[row["id"]] + _QUOTA_ANCHOR_JITTER):
+            continue
+        readings[row["id"]] = (float(used), int(reset))
+    return readings
+
+
+def _remember_antigravity_quota_usage(file_cache, now=None):
+    """Retain metadata-only DB events separately from the combined Gemini ledger.
+
+    JSON/JSONL Gemini CLI sessions never enter this store. Stable session/event
+    identities deduplicate copied DBs; absent sessions are retained after cleanup.
+    Token components, rather than cached prices, allow later pricing corrections.
+    """
+    now = int(datetime.now().timestamp()) if now is None else now
+    selected = {}
+    for path, entry in (file_cache or {}).items():
+        if (not str(path).endswith(".db") or not isinstance(entry, dict)
+                or entry.get("rank") != 3 or entry.get("v") != _GEMINI_PARSE_VERSION):
+            continue
+        sid = str(entry.get("sid") or os.path.basename(path))
+        rank = (str(entry.get("updated") or ""), int(entry.get("mtime", 0)))
+        if sid not in selected or rank > selected[sid][0]:
+            selected[sid] = (rank, entry)
+    path = _ANTIGRAVITY_QUOTA_USAGE_FILE
+    state = {"version": 1, "events": {}, "sources": {}}
+    if not selected and not os.path.isfile(path):
+        return {}
+    import tempfile
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with _ANTIGRAVITY_QUOTA_USAGE_LOCK:
+            fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                _lock_file(fd)
+                try:
+                    with open(path, encoding="utf-8") as handle:
+                        loaded = json.load(handle)
+                    if (isinstance(loaded, dict) and loaded.get("version") == 1
+                            and isinstance(loaded.get("events"), dict)
+                            and isinstance(loaded.get("sources"), dict)):
+                        state = loaded
+                except (OSError, ValueError):
+                    pass
+                changed = False
+                for sid, (rank, entry) in selected.items():
+                    signature = str(entry.get("sig") or "")
+                    previous = state["sources"].get(sid)
+                    previous_signature = previous.get("sig") if isinstance(previous, dict) else previous
+                    if signature and previous_signature == signature:
+                        continue
+                    previous_rank = (str(previous.get("updated") or ""), int(previous.get("mtime", 0))) \
+                        if isinstance(previous, dict) else None
+                    newer = previous_rank is None or rank >= previous_rank
+                    for event in entry.get("events") or []:
+                        if not isinstance(event, dict):
+                            continue
+                        dt = parse_ts(event.get("timestamp", ""))
+                        raw = event.get("tokens") or {}
+                        if not isinstance(raw, dict):
+                            continue
+                        values = [raw.get(key, 0) for key in ("input", "output", "cached", "thoughts")]
+                        model = event.get("model") or "unknown"
+                        if (dt is None or not event.get("id") or not isinstance(model, str)
+                                or not model.isprintable() or len(model) > 120
+                                or any(type(n) is not int or not 0 <= n <= _ANTIGRAVITY_MAX_TOKENS for n in values)
+                                or values[2] > values[0]):
+                            continue
+                        stamp = int(dt.timestamp())
+                        if not _ANTIGRAVITY_MIN_TS <= stamp <= now + 300:
+                            continue
+                        identity = json.dumps([sid, event["id"]], separators=(",", ":"))
+                        row = [stamp, model, *values]
+                        if (identity not in state["events"] or newer) and state["events"].get(identity) != row:
+                            state["events"][identity] = row
+                            changed = True
+                    if signature and newer:
+                        state["sources"][sid] = {"sig": signature, "updated": rank[0], "mtime": rank[1]}
+                        changed = True
+                if changed:
+                    cutoff = now - (_QUOTA_CYCLE_HISTORY + 1) * 7 * 86400
+                    state["events"] = {key: row for key, row in state["events"].items()
+                                       if isinstance(row, list) and len(row) == 6
+                                       and isinstance(row[0], int) and row[0] >= cutoff}
+                    temp_fd, temporary = tempfile.mkstemp(prefix=".antigravity-usage-", dir=os.path.dirname(path))
+                    try:
+                        with os.fdopen(temp_fd, "w", encoding="utf-8") as handle:
+                            json.dump(state, handle, ensure_ascii=False, separators=(",", ":"))
+                        os.replace(temporary, path)
+                    finally:
+                        if os.path.exists(temporary):
+                            os.unlink(temporary)
+            finally:
+                try:
+                    _unlock_file(fd)
+                finally:
+                    os.close(fd)
+    except OSError:
+        pass
+    return state["events"]
+
+
+def _quota_antigravity_cycles(payload, cache, anchors, now):
+    windows = _antigravity_cycle_windows()
+    if not any(anchors.get(key) for key, _title, _window in windows):
+        return []
+    rows = _remember_antigravity_quota_usage(cache.get("gemini") or {}, now)
+    separate_argon = bool(anchors.get("antigravity-gemini-argon-weekly"))
+    pools = {"gemini": [], "3p": [], "argon": []}
+    unknown = []
+    for row in rows.values():
+        if not isinstance(row, list) or len(row) != 6:
+            continue
+        stamp, model, inp, out, cached, thoughts = row
+        if (type(stamp) is not int or not isinstance(model, str)
+                or any(type(n) is not int or not 0 <= n <= _ANTIGRAVITY_MAX_TOKENS
+                       for n in (inp, out, cached, thoughts)) or cached > inp):
+            continue
+        if inp + out + thoughts == 0:
+            continue
+        resolved = str(_resolve_id(model) or model).lower()
+        family = model.casefold()
+        if "gemini" in family:
+            pool = "argon" if separate_argon and "argon" in resolved else "gemini"
+        elif any(name in family for name in ("claude", "gpt", "openai", "opus", "sonnet", "haiku", "fable")):
+            pool = "3p"
+        else:
+            unknown.append(stamp)
+            continue
+        pools[pool].append((stamp, inp + out + thoughts,
+                            _gemini_event_cost(model, inp, out, cached, thoughts)))
+    # Prefix sums keep a year's cycle history linear in the number of events.
+    import bisect
+    indexes = {}
+    for pool, events in pools.items():
+        events.sort()
+        stamps, totals, costs = [], [0], [0.0]
+        for stamp, amount, cost in events:
+            stamps.append(stamp); totals.append(totals[-1] + amount); costs.append(costs[-1] + cost)
+        indexes[pool] = stamps, totals, costs
+    unknown.sort()
+    readings = _quota_antigravity_readings(payload, now)
+    cycles = []
+    for key, title, _window in windows:
+        pool = "argon" if "argon" in key else "3p" if "-3p-" in key else "gemini"
+        stamps, totals, costs = indexes[pool]
+        for start, end, peak, current, window in _quota_anchor_cycles(anchors, key, _QUOTA_CYCLE_HISTORY, now):
+            through = min(end, now + 1)
+            if start >= through:
+                continue
+            lo, hi = bisect.bisect_left(stamps, start), bisect.bisect_left(stamps, through)
+            reading = readings.get(key)
+            fresh = current and reading and abs(reading[1] - end) <= _QUOTA_ANCHOR_JITTER
+            used = reading[0] if fresh else None if current else peak
+            complete = bisect.bisect_left(unknown, start) == bisect.bisect_left(unknown, through)
+            cycles.append({
+                "tool": "antigravity", "window": window, "window_id": key, "window_title": title,
+                "start": start, "end": end, "used_pct": used, "tokens": totals[hi] - totals[lo],
+                "cost": round(max(0.0, costs[hi] - costs[lo]), 4),
+                "devices": {_QUOTA_SELF_DEVICE: totals[hi] - totals[lo]}, "approx": not complete,
+                "current": current, "usage_scope": "local", "projection_available": bool(fresh),
+            })
+    return cycles
 
 
 def _quota_local_day_range(day_key):
@@ -19546,13 +20010,8 @@ def _quota_day_hour_bounds(day_key, start, end):
 def _quota_claude_events(cache=None):
     """去重后的 Claude 事件 → [(epoch, 本地日, tokens, cost)]。去重同 scan_claude。"""
     file_cache = (cache if cache is not None else _load_scan_cache()).get("claude") or {}
-    all_events = []
-    for path, entry in file_cache.items():
-        if isinstance(entry, dict):
-            for event in entry.get("events", []):
-                all_events.append((path, event))
     events = []
-    for _path, event in _dedupe_claude_events(all_events):
+    for _path, event in _dedupe_claude_events(_claude_events_with_side(file_cache)):
         dt = parse_ts(event.get("timestamp", ""))
         if dt is None:
             continue
@@ -19790,6 +20249,10 @@ def _record_local_quota_readings(payload, now=None):
         reading = _quota_tool_reading(payload, tool)
         if reading:
             dirty |= _record_quota_anchor(anchors, tool, reading[1], reading[0], now, window=reading[3])
+    for key, _title, window in _antigravity_cycle_windows():
+        reading = _quota_antigravity_readings(payload, now).get(key)
+        if reading:
+            dirty |= _record_quota_anchor(anchors, key, reading[1], reading[0], now, window=window)
     if dirty:
         _save_quota_anchors(anchors)
 
@@ -19987,6 +20450,11 @@ def _quota_cycle_specs(payload, devices, peer_anchors, now):
             if reading:
                 dirty |= _record_quota_anchor(anchors, tool, reading[1], reading[0], now,
                                               window=reading[3])
+    readings = _quota_antigravity_readings(payload, now)
+    for key, _title, window in _antigravity_cycle_windows():
+        if key in readings:
+            used, reset = readings[key]
+            dirty |= _record_quota_anchor(anchors, key, reset, used, now, window=window)
     boundaries = {tool: [dict(row) for row in rows] for tool, rows in anchors.items()}
     for incoming in peer_anchors:
         _merge_quota_anchors(boundaries, incoming)
@@ -20067,6 +20535,8 @@ def build_quota_detail():
             "approx": approx,
             "current": current,
         })
+
+    cycles.extend(_quota_antigravity_cycles(payload, cache, anchors, now))
 
     merged = {}
     for _name, _tools, _snapshot, daily in devices:

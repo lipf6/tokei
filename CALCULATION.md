@@ -349,6 +349,29 @@ write_cost:
 - `write5m` = OpenRouter 的 `cache_write` 价(5 分钟 TTL)
 - `write1h` = Anthropic 为 `2 × input_price`(1 小时 TTL)
 
+单次消息先按模型计算 Token 费用，包含适用的长提示费率。Fable 5.2 消息标记为 Fast 时，Token 费用乘以 2。网页搜索另按每次 $0.01 计入。
+
+### Claude Code 侧调用（cost-state）
+
+Claude Code 的部分辅助调用没有单独的 `type=assistant` 用量行，例如 Haiku 处理网页搜索和读取、主模型压缩上下文。
+
+会话结束时，Claude Code 将这些用量写入 `cost-state` 的 `modelUsage`，按模型保存整个会话的 Token、缓存档位、搜索次数和估算费用。续聊时从上次记录恢复后继续累加。
+
+Tokei 将每行 `cost-state` 换算成一段用量。
+
+```
+本段增量 = 这一行 − 上一行            （任一数值回落 → 视为重新计数，整行即本段）
+本段已记 = 本段内 assistant 消息用量  （主会话文件按行号；同会话 subagents/*.jsonl 按时间）
+侧调用   = max(0, 本段增量 − 本段已记)，逐个模型、逐个字段
+成本     = 按价格表计 Token + 搜索次数 × $0.01（消息和侧调用分别计入）
+```
+
+- 每段按模型生成事件，以本段最后一条带时间戳的记录归日。缓存写先扣除消息已记录的 5 分钟和 1 小时用量，再对剩余部分计价。
+- 长提示费率取决于单次请求。对有长提示费率的模型，侧调用优先用 Claude Code 的有效 `costUSD` 增量扣除消息费用，缺少有效差值时按基础费率估算。
+- 账本沿用主会话文件的来源标识，重复结算行的增量为 0。
+- 「按模型」的搜索次数来自 `cost-state` 和消息里的 `web_search_requests`，按上述规则去重。网页读取次数只来自模型消息的 `web_fetch_requests`。仅记录工具调用和结果的 WebFetch 日志无法归属到处理网页的模型。
+- 会话还没结束（没有 cost-state）时看不到侧调用，结束后下一轮扫描补上。
+
 ### Codex 成本公式
 
 ```
@@ -371,6 +394,19 @@ cost = non_cached_input/1M × price_in
 ```
 
 思考 token 按输出价计费。
+
+Antigravity Orchestrator 的内部名称需要映射到实际模型：
+
+| 日志模型 | API 价格参照 | 输入 / 输出 / 缓存读（美元 / 百万 token） |
+| --- | --- | --- |
+| `gemini-pro-orchestrator-g1-pro` / `gemini-pro-orchestrator-argon` | Gemini 4 Argon | 2 / 10 / 0.10 |
+| `gemini-pro-orchestrator` | Gemini 4 Carbon | 2 / 10 / 0.10 |
+| `gemini-flash-worker-agy` | Gemini 4 Hydrogen | 1.5 / 7.5 / 0.075 |
+
+模型角色来自 [Antigravity 官方说明](https://antigravity.google/docs/models#orchestrator)，
+价格按 [Google 官方价目表](https://aistudio.google.com/docs/pricing)于 2026-11-17 核对。
+Carbon / Argon 表内优惠价截至 2026-11-30。这里估算 API 等价成本，订阅额度和实际扣款由服务方决定。
+旧日账本只重算这些内部名称的成本，保留 Token、计时和其他模型；思考 Token 单独标为「推理」。
 
 ### Qwen Code 成本公式
 
@@ -610,3 +646,12 @@ session_total = input + output + cache_read + cache_write
 - DeepSeek Harness 从无来源明细的旧账本迁移时，已完整重建 token 的零余额不再保留旧币种费用；仍有无法重建的历史 token 时保留旧费用，不猜测历史汇率或渠道。
 - OpenCode 仅有按日汇总的历史账本且日志不完整时，保留原日快照，避免新计价版本覆盖更大的历史总量。此时费用保持旧口径，直到现存日志恢复完整；无法据此精确分离被删除记录和后续新增调用。
 - 项目排行显示人民币费用；活动热图颜色按每日 token 量计算，费用标签仍按美元、人民币分别显示，币种之间不相加。
+
+### Antigravity 额度周期和容量估算
+
+- 周期统计、预测和额度轨迹与现有周额度口径保持一致，仅记录 Gemini、Claude/GPT 的周额度；官方单列 Argon 周额度时，Argon 用量从共享 Gemini 池中分离。
+- 周期 Token 与 API 成本仅统计本机 Antigravity conversation DB 的生成事件，排除 Gemini CLI JSON/JSONL。按会话与事件身份去重，以秒级时间戳精确截取 `[周期开始, min(周期结束, 当前秒 + 1))`。
+- 输入计数已含缓存读取，Token 总数为 `input + output + thoughts`，缓存不再重复相加。费用沿用各事件模型的当前价格。
+- `antigravity_quota_usage.json` 仅保留会话与事件编号、时间、模型与 Token 元数据，独立于合并 Gemini 账本，避免重复计入全局统计；源数据清理后仍可重算最近约一年的周期，价格更新也可重新计价。
+- 整周期容量估算为 `本机已记录 Token / 已用额度百分比 × 100`，API 成本同理。这是按已记录模型组合折算的满额度容量，额度读数为账号级，本机用量不代表账号在其他设备上的完整用量。
+- Antigravity 有非零有效额度读数和已记录用量就直接估算，不设 3% 起算门槛；读数过期、用量为零或结果超出数值范围时不显示估算。无法归属的非零用量仅使已记录用量标注为近似，不关闭整个额度池的预测；零 Token 记录不影响完整性。不同周额度池的百分比互不合并。

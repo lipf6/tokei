@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 private enum TestFailure: Error {
     case assertion(String)
@@ -16,6 +17,7 @@ struct UsageSummaryBuilderCheck {
         L10n.forcedLanguage = .zh
         // ImageRenderer needs an AppKit app instance (same as --shot).
         _ = NSApplication.shared
+        try checkAccountMask()
 
         let usage = try decodeFixture(Self.fixtureJSON)
         let allVisible = UsageToolVisibility.allVisible
@@ -314,6 +316,28 @@ struct UsageSummaryBuilderCheck {
         }
 
         print("usage summary builder checks passed")
+    }
+
+    @MainActor
+    private static func checkAccountMask() throws {
+        func render(_ account: String) throws -> Data {
+            let renderer = ImageRenderer(content: ProviderAccountLabel(account: account))
+            guard let image = renderer.cgImage, let data = NSBitmapImageRep(cgImage: image).tiffRepresentation else {
+                throw TestFailure.assertion("account label did not render")
+            }
+            return data
+        }
+        let cases = [
+            ("abcdefg@example.com", "ab•••fg@example.com"), ("alice", "a•••e"),
+            ("ab", "a•••"), ("x@example.com", "•••@example.com"), ("", ""),
+            ("张小明", "张•••明"),
+        ]
+        for (account, masked) in cases {
+            try expect(ProviderAccountLabel.masked(account) == masked, "incorrect partial account mask")
+        }
+        let first = try render("ab123fg@example.invalid")
+        let second = try render("ab45678fg@example.invalid")
+        try expect(first == second, "the initial card must conceal the middle of the account")
     }
 
     private static func decodeFixture(_ json: String) throws -> Usage {

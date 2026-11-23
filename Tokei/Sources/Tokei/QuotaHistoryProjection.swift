@@ -1,9 +1,25 @@
 import Foundation
 
+enum AntigravityHistoryWindow: String, CaseIterable, Identifiable {
+    case geminiWeek = "antigravity-gemini-weekly"
+    case thirdPartyWeek = "antigravity-3p-weekly"
+    case argonWeek = "antigravity-gemini-argon-weekly"
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .geminiWeek: return "Gemini 周" // l10n-ignore
+        case .thirdPartyWeek: return "Claude/GPT 周" // l10n-ignore
+        case .argonWeek: return "Gemini 4 Argon 周" // l10n-ignore
+        }
+    }
+}
+
 enum QuotaHistoryTool: String, CaseIterable, Identifiable {
     case claude = "Claude Code"
     case codex = "Codex"
     case kimi = "Kimi Code"
+    case antigravity = "Antigravity"
 
     var id: String { rawValue }
 
@@ -16,6 +32,8 @@ enum QuotaHistoryTool: String, CaseIterable, Identifiable {
             return ["周"] // l10n-ignore
         case .kimi:
             return ["周", "5 小时"] // l10n-ignore
+        case .antigravity:
+            return AntigravityHistoryWindow.allCases.map(\.title)
         }
     }
 }
@@ -99,8 +117,11 @@ struct QuotaHistoryProjection {
     var activityEvents: [QuotaActivityEvent]
     var hoverSamples: [QuotaHoverSample]
 
-    init(points: [QuotaHistoryPoint], tool: QuotaHistoryTool) {
-        let windows = tool.windowNames
+    init(points: [QuotaHistoryPoint], tool: QuotaHistoryTool, selectedWindow: String? = nil) {
+        let windows = tool.windowNames.filter { selectedWindow == nil || $0 == selectedWindow }
+        let points = tool == .antigravity
+            ? points.filter { point in windows.contains { Self.value(for: $0, point: point, tool: tool) != nil } }
+            : points
         self.points = points
         windowNames = windows
 
@@ -208,12 +229,13 @@ struct QuotaHistoryProjection {
     /// 这里只描述实际读数的变化，不推断是否使用了重置卡。
     static func latestRecovery(
         from points: [QuotaHistoryPoint],
-        tool: QuotaHistoryTool
+        tool: QuotaHistoryTool,
+        selectedWindow: String? = nil
     ) -> QuotaChangeEvent? {
         var previous: [String: (point: QuotaHistoryPoint, remaining: Double)] = [:]
         var latest: QuotaChangeEvent?
         for point in points {
-            for window in tool.windowNames {
+            for window in tool.windowNames where selectedWindow == nil || window == selectedWindow {
                 guard let remaining = value(for: window, point: point, tool: tool) else { continue }
                 if let prior = previous[window], isRecovery(from: prior.remaining, to: remaining) {
                     latest = QuotaChangeEvent(
@@ -384,6 +406,7 @@ struct QuotaHistoryProjection {
         case .claude: return point.claudeActivity
         case .codex: return point.codexActivity
         case .kimi: return point.kimiActivity
+        case .antigravity: return []
         }
     }
 
@@ -415,6 +438,11 @@ struct QuotaHistoryProjection {
             return point.kimiWeekRemaining
         case (.kimi, "5 小时"): // l10n-ignore
             return point.kimiFiveHourRemaining
+        case (.antigravity, _):
+            guard let id = AntigravityHistoryWindow.allCases.first(where: { $0.title == window })?.rawValue,
+                  let value = point.antigravityRemaining?[id], value.isFinite,
+                  (0...100).contains(value) else { return nil }
+            return value
         default:
             return nil
         }

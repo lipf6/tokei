@@ -19,6 +19,8 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
     var claudeActivity: [QuotaModelActivity] = []
     var codexActivity: [QuotaModelActivity] = []
     var kimiActivity: [QuotaModelActivity] = []
+    /// Provider window IDs stay stable across display-language changes.
+    var antigravityRemaining: [String: Double]?
 
     var id: Int { timestamp }
 
@@ -26,7 +28,7 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
         case timestamp, claudeFiveHourRemaining, claudeWeekRemaining
         case claudeFableWeekRemaining, codexWeekRemaining
         case kimiFiveHourRemaining, kimiWeekRemaining
-        case claudeActivity, codexActivity, kimiActivity
+        case claudeActivity, codexActivity, kimiActivity, antigravityRemaining
     }
 
     init(
@@ -39,7 +41,8 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
         kimiWeekRemaining: Double? = nil,
         claudeActivity: [QuotaModelActivity] = [],
         codexActivity: [QuotaModelActivity] = [],
-        kimiActivity: [QuotaModelActivity] = []
+        kimiActivity: [QuotaModelActivity] = [],
+        antigravityRemaining: [String: Double]? = nil
     ) {
         self.timestamp = timestamp
         self.claudeFiveHourRemaining = claudeFiveHourRemaining
@@ -51,6 +54,7 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
         self.claudeActivity = claudeActivity
         self.codexActivity = codexActivity
         self.kimiActivity = kimiActivity
+        self.antigravityRemaining = antigravityRemaining
     }
 
     init(from decoder: Decoder) throws {
@@ -65,7 +69,8 @@ struct QuotaHistoryPoint: Codable, Equatable, Identifiable {
             kimiWeekRemaining: try container.decodeIfPresent(Double.self, forKey: .kimiWeekRemaining),
             claudeActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .claudeActivity) ?? [],
             codexActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .codexActivity) ?? [],
-            kimiActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .kimiActivity) ?? []
+            kimiActivity: try container.decodeIfPresent([QuotaModelActivity].self, forKey: .kimiActivity) ?? [],
+            antigravityRemaining: try container.decodeIfPresent([String: Double].self, forKey: .antigravityRemaining)
         )
     }
 }
@@ -80,6 +85,7 @@ struct QuotaCapture {
     var claudeModelTotals: [String: Int]
     var codexModelTotals: [String: Int]
     var kimiModelTotals: [String: Int]
+    var antigravityRemaining: [String: Double]
 
     init(
         claudeFiveHourRemaining: Double? = nil,
@@ -90,7 +96,8 @@ struct QuotaCapture {
         kimiWeekRemaining: Double? = nil,
         claudeModelTotals: [String: Int] = [:],
         codexModelTotals: [String: Int] = [:],
-        kimiModelTotals: [String: Int] = [:]
+        kimiModelTotals: [String: Int] = [:],
+        antigravityRemaining: [String: Double] = [:]
     ) {
         self.claudeFiveHourRemaining = claudeFiveHourRemaining
         self.claudeWeekRemaining = claudeWeekRemaining
@@ -101,6 +108,7 @@ struct QuotaCapture {
         self.claudeModelTotals = claudeModelTotals
         self.codexModelTotals = codexModelTotals
         self.kimiModelTotals = kimiModelTotals
+        self.antigravityRemaining = antigravityRemaining
     }
 }
 
@@ -264,7 +272,8 @@ final class QuotaHistoryStore: ObservableObject {
             kimiWeekRemaining: normalized(capture.kimiWeekRemaining),
             claudeActivity: claudeActivity,
             codexActivity: codexActivity,
-            kimiActivity: kimiActivity
+            kimiActivity: kimiActivity,
+            antigravityRemaining: normalizedWindows(capture.antigravityRemaining)
         )
 
         let hasUsefulData = incoming.claudeFiveHourRemaining != nil ||
@@ -273,6 +282,7 @@ final class QuotaHistoryStore: ObservableObject {
             incoming.codexWeekRemaining != nil ||
             incoming.kimiFiveHourRemaining != nil ||
             incoming.kimiWeekRemaining != nil ||
+            incoming.antigravityRemaining != nil ||
             !incoming.claudeActivity.isEmpty ||
             !incoming.codexActivity.isEmpty ||
             !incoming.kimiActivity.isEmpty
@@ -359,6 +369,11 @@ final class QuotaHistoryStore: ObservableObject {
         return min(100, max(0, value))
     }
 
+    private func normalizedWindows(_ windows: [String: Double]) -> [String: Double]? {
+        let valid = windows.filter { !$0.key.isEmpty && $0.value.isFinite && (0...100).contains($0.value) }
+        return valid.isEmpty ? nil : valid
+    }
+
     private func activity(
         current: [String: Int],
         previous: [String: Int],
@@ -424,6 +439,10 @@ final class QuotaHistoryStore: ObservableObject {
             incoming.kimiFiveHourRemaining ?? existing.kimiFiveHourRemaining
         merged.kimiWeekRemaining =
             incoming.kimiWeekRemaining ?? existing.kimiWeekRemaining
+        if let windows = incoming.antigravityRemaining {
+            merged.antigravityRemaining = (existing.antigravityRemaining ?? [:])
+                .merging(windows) { _, latest in latest }
+        }
         merged.claudeActivity = mergeActivity(existing.claudeActivity, incoming.claudeActivity)
         merged.codexActivity = mergeActivity(existing.codexActivity, incoming.codexActivity)
         merged.kimiActivity = mergeActivity(existing.kimiActivity, incoming.kimiActivity)

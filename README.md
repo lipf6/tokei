@@ -27,7 +27,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 |------|----------|
 | **Claude Code** | Token（输入/输出/缓存）、成本、配额、模型 |
 | **Codex CLI** | Token、成本、配额、会话 |
-| **Gemini / Antigravity CLI** | Token、思考量、成本、模型 |
+| **Gemini / Antigravity CLI** | Token、思考量、成本、模型；Antigravity 支持账号额度、分池周轨迹和本机周期容量估算 |
 | **Cursor** | 账号 Token、请求、API 价成本、按模型统计、套餐额度 |
 | **Zed** | Edit Predictions、订阅周期、账号与套餐 |
 | **Sub2API** | 日/周/月额度、限流窗口、余额、请求与 Token 摘要 |
@@ -117,8 +117,9 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 - Cursor 与 z.ai 的账号级统计在 Dashboard 中单独展示；Grok Bot 本地快照没有 Token 字段，因此官方模型用量直接并入“模型用量”，额度仅在 Grok Bot 主卡片展示
 - 开启多设备同步后，Grok Bot 的官方 Token、模型、费用和额度汇总会进入同步快照；界面采用时间最新的一份账号数据，不会按设备重复相加
 - Grok Bot 额度按实时状态过期；已采集的 Token、模型和费用按日期长期保留，后续成功查询只更新对应日期，不会因授权或网络暂时失效而清空
-- Antigravity 额度只连接已运行客户端的 `127.0.0.1` language server，不会自动启动客户端
+- Antigravity 额度通过已运行客户端的本地服务读取，支持 `ls_*.json` 和 2.34 版的 `hub_*.json`。额度轨迹按周额度池分别记录，容量按本机 Antigravity 会话用量估算。
 - 这 5 个 Provider 的额度与账号标签只保存在本机缓存，不写入多设备 Git 同步快照
+- macOS 额度卡片默认遮住账号中间的字符，邮箱保留域名。点击眼睛可查看完整账号，再点一次或关闭面板就会恢复打码。
 - 其他联网操作包括检查/下载更新，以及手动更新模型价格表
 - CodeBuddy 只读取本地 `~/.codebuddy/projects` 会话 JSONL；不读取 auth、local storage、trace、日志或会话正文，也不会发起账户额度请求
 
@@ -258,6 +259,14 @@ chmod +x ~/.tokei/tokei-sync.sh
 ## 更新日志
 
 ### Unreleased
+
+### v1.0.52
+
+- 恢复 Antigravity 2.34 的额度读取。macOS 可按 Gemini、Claude/GPT 和独立 Argon 周额度池查看用量、历史轨迹与基于本机会话的容量估算。
+- macOS 额度卡片默认遮住账号中间的字符，点击可查看完整账号，关闭面板后恢复打码。
+- 修正 Antigravity Orchestrator 和 Worker 的模型计价，并在模型明细中单列推理用量。
+- Claude Code 补计会话结算中的辅助模型用量，与已记录的消息及子代理用量去重；更新搜索、长提示和 Fable 5.2 Fast 模式计费。
+- 修复部分使用 SQLite WAL 的工具退出后，历史用量卡片消失的问题。
 
 ### v1.0.51
 

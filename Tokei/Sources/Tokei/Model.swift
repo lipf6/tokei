@@ -27,6 +27,8 @@ struct ClaudeModelStat: Codable, Identifiable {
     var pin: Double      // 输入单价 $/M
     var pout: Double     // 输出单价 $/M
     var pcr: Double?     // 缓存读单价 $/M；老数据没有
+    var web_searches: Int? = nil
+    var web_fetches: Int? = nil
     var id: String { name }
     var total: Int { `in` + out + cr + cw }
 }
@@ -1145,6 +1147,18 @@ struct ProviderQuotaStat: Codable {
     var source: String?
     var updated: Int?
     var stale = false
+
+    /// Only current, known quota readings may become history points.
+    func remainingByWindow(at date: Date = Date()) -> [String: Double] {
+        guard available, !stale else { return [:] }
+        let now = Int(date.timeIntervalSince1970)
+        return windows.reduce(into: [:]) { result, window in
+            guard !window.id.isEmpty, window.usage_known,
+                  let used = window.used_pct, used.isFinite, (0...100).contains(used),
+                  window.reset.map({ $0 > now }) ?? true else { return }
+            result[window.id] = 100 - used
+        }
+    }
 
     init() {}
 

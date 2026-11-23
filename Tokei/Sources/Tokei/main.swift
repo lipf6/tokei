@@ -226,7 +226,10 @@ final class Store: ObservableObject {
                 ? nil : usage.kimicode.weekly?.usedPercent.map { 100 - $0 },
             claudeModelTotals: claudeModels,
             codexModelTotals: codexModels,
-            kimiModelTotals: kimiModels
+            kimiModelTotals: kimiModels,
+            antigravityRemaining: usage.antigravity.remainingByWindow().filter {
+                $0.key.hasPrefix("antigravity-") && $0.key.hasSuffix("-weekly")
+            }
         ))
     }
 

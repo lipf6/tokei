@@ -963,26 +963,28 @@ class ProviderQuotaTests(unittest.TestCase):
         self.assertEqual(saved["321"], {"token": "fresh-token", "port": 51213})
 
     def test_antigravity_daemon_file_supplies_token_and_ports(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            daemon = Path(tmp, "daemon")
-            daemon.mkdir()
-            Path(daemon, "ls_fixture.json").write_text(json.dumps({
-                "pid": 4321, "httpsPort": 63041, "httpPort": 63042,
-                "csrfToken": "daemon-token",
-            }), encoding="utf-8")
-            with mock.patch.object(USAGE, "ANTIGRAVITY_DAEMON_DIRS", (str(daemon),)), \
-                    mock.patch.object(USAGE, "_antigravity_pid_alive", return_value=True), \
-                    mock.patch.object(USAGE, "_antigravity_listening_ports",
-                                      return_value=[63041, 63042]):
-                entries = USAGE._antigravity_daemon_credentials()
-                processes = USAGE._antigravity_merge_daemon_processes([], entries)
-                endpoints = USAGE._antigravity_endpoints(processes[0])
+        for filename in ("ls_fixture.json", "hub_63042.json"):
+            with self.subTest(filename=filename):
+                with tempfile.TemporaryDirectory() as tmp:
+                    daemon = Path(tmp, "daemon")
+                    daemon.mkdir()
+                    Path(daemon, filename).write_text(json.dumps({
+                        "pid": 4321, "httpsPort": 63041, "httpPort": 63042,
+                        "csrfToken": "daemon-token",
+                    }), encoding="utf-8")
+                    with mock.patch.object(USAGE, "ANTIGRAVITY_DAEMON_DIRS", (str(daemon),)), \
+                            mock.patch.object(USAGE, "_antigravity_pid_alive", return_value=True), \
+                            mock.patch.object(USAGE, "_antigravity_listening_ports",
+                                              return_value=[63041, 63042]):
+                        entries = USAGE._antigravity_daemon_credentials()
+                        processes = USAGE._antigravity_merge_daemon_processes([], entries)
+                        endpoints = USAGE._antigravity_endpoints(processes[0])
 
-        self.assertEqual(entries[0]["token"], "daemon-token")
-        self.assertEqual(processes[0]["pid"], 4321)
-        self.assertEqual(processes[0]["csrf_token"], "daemon-token")
-        self.assertIn(("https", 63041, "daemon-token", True), endpoints)
-        self.assertIn(("http", 63042, "daemon-token", True), endpoints)
+                self.assertEqual(entries[0]["token"], "daemon-token")
+                self.assertEqual(processes[0]["pid"], 4321)
+                self.assertEqual(processes[0]["csrf_token"], "daemon-token")
+                self.assertIn(("https", 63041, "daemon-token", True), endpoints)
+                self.assertIn(("http", 63042, "daemon-token", True), endpoints)
 
     def test_antigravity_daemon_file_with_dead_pid_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:

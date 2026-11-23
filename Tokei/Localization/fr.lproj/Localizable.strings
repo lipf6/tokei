@@ -257,6 +257,8 @@
 "按天聚合 · 真实 token 消耗" = "Agrégation par jour · consommation réelle de tokens";
 "按模型 (%@)" = "Par modèle (%@)";
 "按模型 · %@" = "Par modèle · %@";
+"搜索 ×%@" = "Recherche ×%@";
+"网页读取 ×%@" = "Lecture web ×%@";
 "按量预算" = "Budget à l'usage";
 "授权 Grok Bot" = "Autoriser Grok Bot";
 "授权助手需要更新：请主动重新授权，后台不会弹出授权窗口" = "L'assistant d'autorisation doit être mis à jour. Réautorisez quand vous le souhaitez ; aucune invite système en arrière-plan.";
@@ -517,3 +519,8 @@
 "正在读取周额度…" = "Lecture du quota hebdomadaire…";
 
 "有效请求的输出 token 合计 ÷ 首字后的生成总时长" = "Total des tokens de sortie des requêtes chronométrées divisé par le temps de génération après le premier token";
+
+"Antigravity 的 Token 和成本来自本机会话，额度为账号级读数。" = "Les tokens et coûts Antigravity proviennent des sessions de cet appareil ; le quota concerne tout le compte.";
+"Antigravity 额度来自本机定时快照；不同额度窗口分别记录，缺失或过期读数会跳过。历史从开始采集后逐步积累。" = "Le quota Antigravity est relevé sur cet appareil. Chaque fenêtre est enregistrée séparément ; les relevés absents ou périmés sont ignorés. L’historique se constitue au fil des relevés.";
+"显示账号" = "Afficher le compte";
+"隐藏账号" = "Masquer le compte";

@@ -651,6 +651,12 @@ class SyncSnapshotAnchorTests(unittest.TestCase):
     def test_key_is_omitted_when_there_is_nothing_to_share(self):
         self.assertNotIn("_quota_anchors", self._snapshot({}))
 
+    def test_antigravity_pool_readings_stay_local(self):
+        local = {"antigravity-gemini-weekly": [_anchor(5 * WEEK, 22.0)]}
+        shared = {"codex": [_anchor(5 * WEEK, 40.0)]}
+        self.assertNotIn("_quota_anchors", self._snapshot(local))
+        self.assertEqual(self._snapshot({**local, **shared})["_quota_anchors"], shared)
+
 
 if __name__ == "__main__":
     unittest.main()

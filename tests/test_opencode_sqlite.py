@@ -200,6 +200,38 @@ class OpenCodeSqliteTests(unittest.TestCase):
                 USAGE.scan_hermes(USAGE.range_bounds(), cache)
                 self.assertEqual(scan.call_count, 2)
 
+    def test_checkpointed_wal_database_in_readonly_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            db = directory / "state.db"
+            writer = sqlite3.connect(db)
+            try:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("CREATE TABLE events (amount INTEGER)")
+                writer.execute("INSERT INTO events VALUES (23)")
+                writer.commit()
+            finally:
+                writer.close()
+            self.assertFalse(Path(str(db) + "-wal").exists())
+            directory.chmod(0o555)
+            try:
+                reader = USAGE._sqlite_open_readonly(db)
+                try:
+                    self.assertEqual(reader.execute("SELECT amount FROM events").fetchone(), (23,))
+                finally:
+                    reader.close()
+            finally:
+                directory.chmod(0o700)
+
+    def test_pending_wal_prevents_immutable_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.db"
+            Path(str(db) + "-wal").write_bytes(b"pending")
+            with mock.patch.object(sqlite3, "connect", side_effect=sqlite3.OperationalError) as connect:
+                with self.assertRaises(sqlite3.OperationalError):
+                    USAGE._sqlite_open_readonly(db)
+                connect.assert_called_once_with(USAGE._sqlite_ro_uri(db), uri=True, timeout=5.0)
+
     def test_openclaw_task_cache_reads_new_wal_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "runs.sqlite"
