@@ -260,6 +260,10 @@ chmod +x ~/.tokei/tokei-sync.sh
 
 ### Unreleased
 
+### v1.0.53
+
+- DeepSeek Harness 卡片和模型明细支持从回复内嵌的流记录计算平均输出速度和首字延迟中位数。升级后会自动补算本机仍保留日志的会话。
+
 ### v1.0.52
 
 - 恢复 Antigravity 2.34 的额度读取。macOS 可按 Gemini、Claude/GPT 和独立 Argon 周额度池查看用量、历史轨迹与基于本机会话的容量估算。
