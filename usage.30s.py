@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# TOKEI_COLLECTOR_REVISION=12
+# TOKEI_COLLECTOR_REVISION=13
 # <bitbar.title>AI Usage Bar</bitbar.title>
 # <bitbar.version>v0.1</bitbar.version>
 # <bitbar.author>local</bitbar.author>
@@ -12901,8 +12901,8 @@ def scan_grok_bot(bounds, cache):
 # ---------- DeepSeek Harness ----------
 # Harness 会为同一次调用写 usage chunk 和最终 message。按 session/turn/step
 # 只保留最终 message；异常中断时再用 usage chunk 兜底。
-# 7：经网关选路由组时按 replayState 里真正作答的模型归因。
-_DEEPSEEK_HARNESS_COST_VERSION = 7
+# 8：重读最终消息内嵌的流式计时，更新已有会话缓存和逐日账本。
+_DEEPSEEK_HARNESS_COST_VERSION = 8
 
 
 def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="deepseek-official"):
@@ -12978,6 +12978,26 @@ def _deepseek_harness_usage_record(item, fallback_model="", fallback_provider="d
         "cost": 0.0 if official_cny else cost,
         "cost_cny": cost if official_cny else 0.0,
     }
+
+
+def _deepseek_harness_stream_timing(stream, start, message_time):
+    """读取本次尝试的首个内容块和流结束标记，时间单位为毫秒。"""
+    if start is None or not isinstance(stream, list):
+        return None
+    first = None
+    for entry in stream:
+        if not isinstance(entry, dict) or entry.get("type") != "chunk":
+            continue
+        chunk = entry.get("chunk")
+        moment = entry.get("time")
+        if (not isinstance(chunk, dict) or not isinstance(moment, (int, float))
+                or not start <= moment <= message_time):
+            continue
+        if chunk.get("type") == "block-start" and first is None:
+            first = moment
+        elif chunk.get("type") == "finish" and first is not None and moment > first:
+            return (moment - first) / 1000, (first - start) / 1000
+    return None
 
 
 def _iter_deepseek_harness_records(file_cache):
@@ -13079,10 +13099,18 @@ def scan_deepseek_harness(bounds, cache):
                     key = (record["turn"], record["step"])
                     previous = candidates.get(key)
                     if previous is None or record["priority"] >= previous["priority"]:
+                        if event_type == "assistant/message":
+                            sample = _deepseek_harness_stream_timing(
+                                item["data"].get("stream"), timing.get(key, {}).get("start"),
+                                record["ts"])
+                            if sample is not None:
+                                record["gen"], record["ttft"] = sample
                         candidates[key] = record
         except OSError:
             continue
         for (turn, step), record in candidates.items():
+            if "gen" in record:
+                continue
             step_timing = timing.get((turn, step)) or {}
             start, first = step_timing.get("start"), step_timing.get("first")
             end = step_timing.get("end") or record["ts"]

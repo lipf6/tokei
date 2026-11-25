@@ -376,6 +376,67 @@ class DeepSeekHarnessPerfTests(unittest.TestCase):
         self.assertEqual(perf["tps"], 100.0, "重试后首块到 finish 是 5 秒")
         self.assertEqual(round(perf["ttft"], 1), 1.0, "TTFT 从重试开始算")
 
+    def test_embedded_stream_times_survive_retry_and_duplicate_top_level_chunks(self):
+        start = int(datetime.now().timestamp() * 1000) - 60_000
+        events = self.step(start, retry_at=10_000)
+        message = events[-1]
+        message["data"]["stream"] = [
+            {"type": "chunk", "time": event["time"], "chunk": event["data"]["chunk"]}
+            for event in events if event["type"] == "assistant/chunk"
+        ]
+        # 回复落盘延迟不属于生成耗时。内嵌流可能同时保留重试前的块。
+        message["time"] += 2_000
+        for has_top_level in (False, True):
+            with self.subTest(has_top_level=has_top_level):
+                rows = [e for e in events if has_top_level or e["type"] != "assistant/chunk"]
+                perf = self.scan(rows)
+                self.assertIsNotNone(perf)
+                self.assertEqual((perf["n"], perf["o"], perf["g"], perf["tps"]),
+                                 (1, 500, 5.0, 100.0))
+                self.assertEqual(round(perf["ttft"], 1), 1.0)
+
+    def test_incomplete_embedded_timing_is_excluded_from_speed(self):
+        start = int(datetime.now().timestamp() * 1000) - 60_000
+        events = self.step(start)
+        message = events[-1]
+        chunk = {"type": "chunk", "time": start + 800, "chunk": {"type": "block-start"}}
+        for stream in ([chunk], [None, {"chunk": "finish"}], {}, None):
+            with self.subTest(stream=stream):
+                message["data"]["stream"] = stream
+                self.assertIsNone(self.scan([events[0], message]))
+
+    def test_unchanged_session_upgrades_cached_records_and_ledger_once(self):
+        start = int(datetime.now().timestamp() * 1000) - 60_000
+        events = self.step(start)
+        message = events[-1]
+        message["data"]["stream"] = [
+            {"type": "chunk", "time": event["time"], "chunk": event["data"]["chunk"]}
+            for event in events if event["type"] == "assistant/chunk"
+        ]
+        cache = {}
+        bounds = USAGE.range_bounds()
+        ledger = {"v": USAGE._LEDGER_VERSION, "tools": {}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(USAGE, "DEEPSEEK_HARNESS_DIR", tmp), \
+                mock.patch.dict(USAGE._LEDGER_CACHE, data=ledger):
+            path = Path(tmp) / "session.jsonl"
+            path.write_text("\n".join(map(json.dumps, [events[0], message])), encoding="utf-8")
+            with mock.patch.object(USAGE, "_DEEPSEEK_HARNESS_COST_VERSION", 7), \
+                    mock.patch.object(USAGE, "_deepseek_harness_stream_timing", return_value=None):
+                old = USAGE.scan_deepseek_harness(bounds, cache)["ranges"]["all"]
+            self.assertIsNone(USAGE._perf_summary(old.get("perf")))
+            upgraded = USAGE.scan_deepseek_harness(bounds, cache)["ranges"]["all"]
+            with mock.patch.object(USAGE, "_deepseek_harness_usage_record",
+                                   side_effect=AssertionError("unchanged session reparsed")):
+                self.assertEqual(USAGE.scan_deepseek_harness(bounds, cache)["ranges"]["all"], upgraded)
+            self.assertEqual(cache["deepseek_harness"][str(path)]["cost_version"],
+                             USAGE._DEEPSEEK_HARNESS_COST_VERSION)
+        self.assertEqual(USAGE._perf_summary(upgraded["perf"])["n"], 1)
+        day, = ledger["tools"]["deepseek_harness"].values()
+        self.assertEqual(USAGE._perf_summary(day["perf"])["g"], 5.2)
+        for key in ("in", "out", "reason", "cr", "cw", "cost", "cost_cny"):
+            self.assertEqual(upgraded[key], old[key])
+
 
 class LogAndDatabasePerfTests(unittest.TestCase):
     def test_opencode_steps_restart_after_the_previous_step(self):

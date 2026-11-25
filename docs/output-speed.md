@@ -10,6 +10,8 @@ Codex 使用本机 rollout 的请求起点、首段思考或回复的开始时�
 
 例如一次请求输出 600 个 token，总耗时 12 秒，首字等待 2 秒，则平均输出速度为 600 ÷ (12 − 2) = 60 tok/s。
 
+DeepSeek Harness 同时支持独立的 `assistant/chunk` 事件和最终回复 `assistant/message.data.stream` 内的流记录。内嵌流从本次尝试的首个 `block-start` 计时到 `finish`，回复落盘和后续工具执行的耗时不计入。发生重试时，从最后一次重试开始计算首字延迟。两种记录同时存在时，同一步只统计一次。
+
 有效样本需要至少 20 个输出 Token，计时超过 0.2 秒且不超过 30 分钟；超过 3000 tok/s 的样本会被排除。TTFT 超过 120 秒时不进入首字延迟的直方图，生成速率仍可使用有效的生成耗时。TTFT 展示直方图近似中位数；偶数样本取两项中间观测值的平均，分处不同桶时也分别估计后取平均。分桶保留约 5% 的范围，数值精度受分桶影响。
 
 参考：[Pi 消息字段](https://github.com/earendil-works/pi/blob/main/packages/ai/src/types.ts)、[Pi 会话格式](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/session-format.md)、[oh-my-pi 毫秒计时字段](https://github.com/can1357/oh-my-pi/blob/main/packages/ai/src/types.ts)。
