@@ -71,6 +71,16 @@ Tokei 主要读取本地 AI 工具日志，统计 token 用量与成本。额度
 压缩上下文调用也计入；压缩后的上下文大小不当作一次调用用量。主卡片、Dashboard、
 回顾及额度历史的 token 总量都不重复加缓存或推理字段。
 
+经喜鹊路由组（如 `group/smart-split`）发起的请求，使用 Codex 的原始
+`response_id`、会话 ID 关联本机 `~/.config/magpie/usage.jsonl`，优先按回包的
+`served` 模型归属，缺失时使用喜鹊记录的具体上游 `model`。用量仍取 Codex 日志，
+不叠加喜鹊用量，也不将喜鹊自己的路由分类调用计入 Codex。模型明细、费用估算、
+小时统计及速度统计均随真实模型归属更新，工具分类仍为 Codex。
+
+旧缓存仅重读包含路由组的会话，按原响应去重后替换对应来源的账本贡献。喜鹊日志
+晚到时直接补正事件缓存；已确认的模型在喜鹊日志缺失后仍保留。无法关联的请求显示
+“路由模型未识别”，不根据当前路由配置猜测；缺少原始会话或喜鹊记录的历史无法保证还原。
+
 Codex 的子代理和分叉 rollout 可能重放父任务历史。Tokei 使用 `session_meta.id`
 识别当前会话,再从 `forked_from_id` 或
 `source.subagent.thread_spawn.parent_thread_id` 找到父会话,并用

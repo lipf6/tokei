@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# TOKEI_COLLECTOR_REVISION=13
+# TOKEI_COLLECTOR_REVISION=14
 # <bitbar.title>AI Usage Bar</bitbar.title>
 # <bitbar.version>v0.1</bitbar.version>
 # <bitbar.author>local</bitbar.author>
@@ -965,6 +965,8 @@ def nice_model(m: str) -> str:
         return "合成"
     if m == "unknown":
         return "未知"
+    if m.startswith("group/"):
+        return "路由模型未识别"
     import re
     s = m.lower()
     for key, disp in (("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"),
@@ -4433,6 +4435,13 @@ def _codex_link_segment_mirrors(file_cache):
                     event.append(None)
                 event[12] = matched_id
                 changed_paths.add(path)
+                if (str(event[11]).startswith("group/")
+                        and len(response_event) > 15 and response_event[15]):
+                    event.extend([None] * max(0, 16 - len(event)))
+                    event[15] = response_event[15]
+                    event[11] = response_event[11]
+                    event[10] = response_event[10]
+                    file_cache[path].pop("route_log_sig", None)
                 if (_codex_is_reserve_model(event[11])
                         or _codex_is_reserve_model(response_event[11])):
                     if _codex_reclassify_reserve_event(event):
@@ -5031,6 +5040,91 @@ def _codex_rollout_files():
 _CODEX_UNKNOWN = object()
 
 
+_MAGPIE_USAGE_FILE = os.path.join(HOME, ".config", "magpie", "usage.jsonl")
+
+
+def _magpie_served_models():
+    models = {}
+    try:
+        with open(_MAGPIE_USAGE_FILE, "r", encoding="utf-8") as handle:
+            stat = os.fstat(handle.fileno())
+            signature = f"{stat.st_dev}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}"
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict) or record.get("agent") != "codex":
+                    continue
+                requested = record.get("req")
+                response_id = record.get("response_id")
+                if (not isinstance(requested, str) or not requested.startswith("group/")
+                        or not isinstance(response_id, str) or not response_id):
+                    continue
+                served = record.get("served")
+                model = record.get("model")
+                served = served.strip() if isinstance(served, str) else ""
+                model = model.strip() if isinstance(model, str) else ""
+                resolved = served if _names_model(served) else model
+                if not _names_model(resolved):
+                    continue
+                session = record.get("native_session") or record.get("session")
+                session = session if isinstance(session, str) else None
+                models[(session, response_id)] = _model_identity_id(resolved)
+    except (OSError, UnicodeError):
+        return {}, None
+    return models, signature
+
+
+def _codex_route_backfill_needed(entry):
+    if not isinstance(entry, dict) or entry.get("routing_v") == 1:
+        return False
+    if str(entry.get("active_model") or "").startswith("group/"):
+        return True
+    return any(
+        model.startswith("group/")
+        for field in ("days", "deduped_days")
+        for day in (entry.get(field) or {}).values()
+        for model in (day.get("models") or {})
+    )
+
+
+def _codex_attribute_routed_event(event, response_id, session, served_models):
+    if not response_id or _codex_is_reserve_model(event[11]):
+        return False
+    if len(event) < 16:
+        event.extend([None] * (16 - len(event)))
+    event[15] = response_id
+    resolved = (served_models.get((session, response_id))
+                or served_models.get((None, response_id)))
+    if not resolved or event[11] == resolved:
+        return False
+    event[11] = resolved
+    event[10] = _codex_estimated_cost(resolved, event[6], event[7], event[8])
+    return True
+
+
+def _codex_backfill_routed_events(cache, served_models, signature):
+    changed = set()
+    if signature is None:
+        return changed
+    for path, entry in cache["codex"].items():
+        if not entry.get("has_routes") or entry.get("route_log_sig") == signature:
+            continue
+        events = list(_iter_codex_cached_events(path))
+        updated = False
+        for event in events:
+            if len(event) > 15 and event[15]:
+                updated |= _codex_attribute_routed_event(
+                    event, event[15], entry.get("session_id"), served_models)
+        if updated:
+            entry["event_cache_size"] = _codex_write_event_cache(path, events)
+            changed.add(path)
+        entry["route_log_sig"] = signature
+        cache["_dirty"] = True
+    return changed
+
+
 def _codex_page_key(path, entry):
     """同一会话里「这是哪一页」。
 
@@ -5144,6 +5238,7 @@ def scan_codex(bounds, cache, local_only=False):
     active_root = os.path.realpath(CODEX_DIR) if os.path.isdir(CODEX_DIR) else None
     next_checkpoint = _time.monotonic() + _CODEX_SCAN_CHECKPOINT_INTERVAL
     perf_backfill = _codex_perf_backfill_targets(fc, rollout_files)
+    served_models, route_log_sig = _magpie_served_models()
 
     for f in rollout_files:
         stale.discard(f)
@@ -5162,6 +5257,7 @@ def scan_codex(bounds, cache, local_only=False):
             cur_file = f
         sig = f"{st.st_mtime_ns}:{size}"
         entry = fc.get(f)
+        route_backfill = _codex_route_backfill_needed(entry)
         previous_event_cache_size = (
             entry.get("event_cache_size") if isinstance(entry, dict) else None
         )
@@ -5172,13 +5268,13 @@ def scan_codex(bounds, cache, local_only=False):
         if (not entry or entry.get("sig") != sig
                 or entry.get("parser_version") != _CODEX_PARSER_VERSION
                 or entry.get("accounting_version") != _CODEX_ACCOUNTING_VERSION
-                or not event_cache_ready or f in perf_backfill):
+                or not event_cache_ready or f in perf_backfill or route_backfill):
             # Compressed rollouts are immutable snapshots: always parse them whole
             # (offsets would refer to compressed bytes, not records).
             complete_offset = None if is_zst else _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
-            if (isinstance(entry, dict) and f not in perf_backfill and not is_zst
+            if (isinstance(entry, dict) and f not in perf_backfill and not route_backfill and not is_zst
                     and entry.get("parser_version") == _CODEX_PARSER_VERSION
                     and entry.get("accounting_version") == _CODEX_ACCOUNTING_VERSION):
                 old_offset = int(entry.get("parsed_size", 0) or 0)
@@ -5188,6 +5284,12 @@ def scan_codex(bounds, cache, local_only=False):
                     append_from = old_offset
 
             if append_from is None:
+                if event_cache_ready and entry.get("has_routes"):
+                    for prior_event in _iter_codex_cached_events(f):
+                        if (len(prior_event) > 15 and prior_event[15]
+                                and _names_model(prior_event[11])):
+                            served_models.setdefault(
+                                (entry.get("session_id"), prior_event[15]), prior_event[11])
                 events = []
                 session_id, forked_from_id, history_base = _codex_session_meta(f)
                 file_limits = None; file_limits_ts = None; file_plan = None
@@ -5196,6 +5298,7 @@ def scan_codex(bounds, cache, local_only=False):
                 file_last_total = None
                 prev_total_key = None
                 file_model = None
+                has_routes = False
                 response_ids = set()
                 pending_responses = []
                 last_legacy_snapshot = None
@@ -5216,6 +5319,7 @@ def scan_codex(bounds, cache, local_only=False):
                 previous = entry.get("prev_total_key")
                 prev_total_key = tuple(previous) if isinstance(previous, (list, tuple)) else None
                 file_model = entry.get("active_model")
+                has_routes = bool(entry.get("has_routes"))
                 response_ids = set(entry.get("response_ids") or [])
                 pending_responses = list(entry.get("pending_responses") or [])
                 last_legacy_snapshot = entry.get("last_legacy_snapshot")
@@ -5227,6 +5331,7 @@ def scan_codex(bounds, cache, local_only=False):
                         f, start_offset=parse_start, end_offset=complete_offset):
                     if record_kind == "model":
                         file_model = record
+                        has_routes |= record.startswith("group/")
                         continue
                     if record_kind == "trigger":
                         # 工具结果 / 用户消息写入：下一个请求从这一刻开始
@@ -5257,6 +5362,7 @@ def scan_codex(bounds, cache, local_only=False):
                         continue
                     is_response = o.get("type") == "token_usage_record"
                     response_id = None
+                    raw_id = None
                     if is_response:
                         usage = payload.get("usage") or {}
                         if not isinstance(usage, dict):
@@ -5283,6 +5389,9 @@ def scan_codex(bounds, cache, local_only=False):
                             if (response_id and prior_events
                                     and list(prior_events[-1][2:10]) == snapshot_key):
                                 prior_events[-1][12] = response_id
+                                if str(file_model or "").startswith("group/"):
+                                    _codex_attribute_routed_event(
+                                        prior_events[-1], raw_id, session_id, served_models)
                                 if prior_events is not events:
                                     entry["event_cache_size"] = _codex_write_event_cache(f, prior_events)
                                     dedupe_paths.add(f)
@@ -5359,8 +5468,11 @@ def scan_codex(bounds, cache, local_only=False):
                         # timestamp, local day, cumulative usage, incremental usage, cost,
                         # model, response id, generation seconds, time to first token
                         if li or lc or lo or lr:
-                            events.append([ts.isoformat(), dk, *totals, li, lc, lo, lr, cost, model,
-                                           response_id, gen, ttft])
+                            event = [ts.isoformat(), dk, *totals, li, lc, lo, lr, cost, model,
+                                     response_id, gen, ttft]
+                            if str(file_model or "").startswith("group/"):
+                                _codex_attribute_routed_event(event, raw_id, session_id, served_models)
+                            events.append(event)
                             perf_trigger = perf_first = None
             except OSError:
                 continue
@@ -5411,6 +5523,7 @@ def scan_codex(bounds, cache, local_only=False):
                 "last_total": file_last_total, "prev_total_key": prev_total_key,
                 "active_model": file_model, "parser_version": _CODEX_PARSER_VERSION,
                 "accounting_version": _CODEX_ACCOUNTING_VERSION,
+                "routing_v": 1, "has_routes": has_routes,
                 "response_ids": sorted(response_ids), "pending_responses": pending_responses,
                 "last_legacy_snapshot": last_legacy_snapshot,
                 "perf_state": [perf_trigger, perf_first],
@@ -5444,6 +5557,10 @@ def scan_codex(bounds, cache, local_only=False):
     linked_paths = _codex_link_segment_mirrors(fc)
     if linked_paths:
         dedupe_paths.update(linked_paths)
+    routed_paths = _codex_backfill_routed_events(cache, served_models, route_log_sig)
+    if routed_paths:
+        dedupe_paths.update(routed_paths)
+        cache["_dirty"] = True
     # 项目路径按需补齐,让 Codex 参与项目足迹与回顾页。没读到也写空串占位,
     # 免得每轮扫描都为同一批读不出 cwd 的会话重复开文件。
     horizon = (datetime.now() - timedelta(days=_CODEX_PROJECT_BACKFILL_DAYS)).isoformat()

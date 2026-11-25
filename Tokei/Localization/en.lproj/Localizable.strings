@@ -388,6 +388,7 @@
 "未检测到本地数据: %@" = "No local data found: %@";
 "未知 (%@)" = "Unknown (%@)";
 "未知" = "Unknown";
+"路由模型未识别" = "Routed model unidentified";
 "未设置" = "Not set";
 "未读取到额度。请确认千问办公已登录并保持运行。" = "No quota read. Make sure QwenWork is signed in and running.";
 "本会话 %@" = "This session: %@";
