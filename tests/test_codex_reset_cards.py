@@ -186,7 +186,7 @@ class CodexResetCardsTests(unittest.TestCase):
         opener = mock.Mock(return_value=_Response(payload))
         with mock.patch("urllib.request.urlopen", opener):
             first = USAGE.fetch_codex_reset_cards(now_epoch=now)
-            second = USAGE.fetch_codex_reset_cards(now_epoch=now + 3600)
+            second = USAGE.fetch_codex_reset_cards(now_epoch=now + 60)
 
         self.assertEqual(first["count"], 0)
         self.assertEqual(second["count"], 0)
@@ -197,40 +197,36 @@ class CodexResetCardsTests(unittest.TestCase):
             now + USAGE._CODEX_RESET_CARDS_REFRESH_INTERVAL,
         )
 
-    def test_legacy_daily_deadline_is_clamped_after_upgrade(self):
+    def test_new_grant_refreshes_after_one_hour_despite_old_six_hour_deadline(self):
         now = 1_785_000_000
-        context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
-        cards = USAGE._normalize_codex_reset_cards(self.payload(), now)
-        self.cache_path.write_text(json.dumps({
-            "account_key": context["account_key"],
-            "auth_key": context["auth_key"],
-            "fetched_at": now,
-            "cards": cards,
-            "next_attempt_at": now + 24 * 3600,
-        }))
-        payload = self.payload()
-        payload["credits"].append({
-            "status": "available",
-            "is_supported_by_plan": True,
-            "expires_at": "2026-08-03T00:00:00Z",
-        })
-        opener = mock.Mock(return_value=_Response(payload))
+        three = {"availableCount": 3, "credits": [
+            {"status": "available", "expiresAt": now + offset}
+            for offset in (10000, 20000, 30000)
+        ]}
+        four = {"availableCount": 4, "credits": three["credits"] + [
+            {"status": "available", "expiresAt": now + 40000},
+        ]}
+        with mock.patch("urllib.request.urlopen", return_value=_Response(three)):
+            USAGE.fetch_codex_reset_cards(now_epoch=now)
+        state = json.loads(self.cache_path.read_text())
+        state["next_attempt_at"] = now + 6 * 3600
+        self.cache_path.write_text(json.dumps(state))
 
-        with mock.patch("urllib.request.urlopen", opener):
-            result = USAGE.fetch_codex_reset_cards(
-                now_epoch=now + USAGE._CODEX_RESET_CARDS_REFRESH_INTERVAL + 1,
-            )
+        with mock.patch("urllib.request.urlopen", return_value=_Response(four)) as opener:
+            self.assertEqual(USAGE.fetch_codex_reset_cards(now + 3599)["count"], 3)
+            opener.assert_not_called()
+            refreshed = USAGE.fetch_codex_reset_cards(now + 3600)
+            self.assertEqual(refreshed["count"], 4)
+            self.assertEqual(refreshed["expires"][-1], now + 40000)
+            opener.assert_called_once()
 
-        self.assertEqual(result["count"], 2)
-        self.assertEqual(opener.call_count, 1)
-
-    def test_nearest_expiry_refreshes_before_daily_interval(self):
+    def test_nearest_expiry_refreshes_before_regular_interval(self):
         now = 1_785_000_000
-        cards = {"count": 1, "expires": [now + 600], "updated": now}
+        cards = {"count": 1, "expires": [now + 120], "updated": now}
 
         self.assertEqual(
             USAGE._codex_reset_cards_next_attempt(cards, now),
-            now + 660,
+            now + 180,
         )
 
     def test_failure_uses_cache_and_backs_off(self):
@@ -257,6 +253,15 @@ class CodexResetCardsTests(unittest.TestCase):
             state["next_attempt_at"],
             now + USAGE._CODEX_RESET_CARDS_RETRY_INTERVAL,
         )
+
+    def test_failed_refresh_after_stale_success_honors_retry_deadline(self):
+        now = 1_785_000_000
+        with mock.patch("urllib.request.urlopen", return_value=_Response(self.payload())):
+            first = USAGE.fetch_codex_reset_cards(now)
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")) as opener:
+            self.assertEqual(USAGE.fetch_codex_reset_cards(now + 3601), first)
+            self.assertEqual(USAGE.fetch_codex_reset_cards(now + 3661), first)
+            opener.assert_called_once()
 
     def test_expired_cached_card_is_hidden_during_failure(self):
         now = 1_785_000_000

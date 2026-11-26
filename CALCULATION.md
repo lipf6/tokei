@@ -486,9 +486,8 @@ OpenAI 给 Codex 的 fallback 额度:常规高级模型额度见底后,会话切
 重置卡优先通过本机 Codex App Server 的 `account/rateLimits/read` RPC 读取（复用已安装的
 `codex` 二进制，登录 Token 不经由 Tokei 暴露）；App Server 不可用时回退到 legacy 的
 `/backend-api/wham/rate-limit-reset-credits` 接口，使用当前 Codex 登录态只读查询。
-本地仅缓存可用数量和到期时间，不保存卡片 ID、邀请信息或个人资料；两次自动查询至少
-间隔 6 小时，最近一张卡到期后立即更新，失败后 6 小时再试（404/410 视为接口不再支持，
-按常规间隔重试）。未登录或仅使用 API Key 时不请求；401/403 静默隐藏或沿用未过期缓存，
+本地仅缓存可用数量和到期时间，不保存卡片 ID、邀请信息或个人资料；成功后每小时重查一次，最近一张卡到期 1 分钟后可提前重查。
+请求失败后 6 小时再试。未登录或仅使用 API Key 时不请求；401/403 静默隐藏或沿用未过期缓存，
 Codex 刷新登录 Token 后立即重试。
 
 ### Kimi Code(usages)

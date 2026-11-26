@@ -3104,7 +3104,7 @@ _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
 _CODEX_RESET_CARDS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 _CODEX_RESET_CARDS_CACHE_VERSION = 3
-_CODEX_RESET_CARDS_REFRESH_INTERVAL = 6 * 3600
+_CODEX_RESET_CARDS_REFRESH_INTERVAL = 3600
 _CODEX_RESET_CARDS_RETRY_INTERVAL = 6 * 3600
 _CODEX_RESET_CARDS_MAX_RESPONSE_BYTES = 256 * 1024
 _CODEX_APP_SERVER_TIMEOUT = 10
@@ -3508,7 +3508,7 @@ def _cached_codex_reset_cards(state, now_epoch):
 
 
 def _codex_reset_cards_next_attempt(cards, now_epoch):
-    next_daily = int(now_epoch + _CODEX_RESET_CARDS_REFRESH_INTERVAL)
+    regular_refresh = int(now_epoch + _CODEX_RESET_CARDS_REFRESH_INTERVAL)
     expires = []
     for value in cards.get("expires") or []:
         try:
@@ -3517,7 +3517,7 @@ def _codex_reset_cards_next_attempt(cards, now_epoch):
             continue
         if epoch > now_epoch:
             expires.append(epoch)
-    return min(next_daily, min(expires) + 60) if expires else next_daily
+    return min(regular_refresh, min(expires) + 60) if expires else regular_refresh
 
 
 def _save_codex_reset_cards_state(state):
@@ -3690,17 +3690,15 @@ def fetch_codex_reset_cards(now_epoch=None):
         next_attempt_at = int(state.get("next_attempt_at") or 0)
     except (TypeError, ValueError, OverflowError):
         next_attempt_at = 0
-    # Older versions cached successful responses for 24 hours. Clamp that saved
-    # deadline so newly granted cards become visible after upgrading.
-    try:
-        last_success_at = int(state.get("fetched_at") or cached.get("updated") or 0)
-    except (TypeError, ValueError, OverflowError):
-        last_success_at = 0
-    if next_attempt_at and last_success_at:
-        next_attempt_at = min(
-            next_attempt_at,
-            last_success_at + _CODEX_RESET_CARDS_REFRESH_INTERVAL,
-        )
+    # Shorten old success deadlines on upgrade. A failed lookup has its own
+    # retry deadline, independent of the age of the last successful snapshot.
+    if next_attempt_at and not state.get("last_error"):
+        try:
+            fetched_at = int(state.get("fetched_at") or cached.get("updated") or 0)
+            if fetched_at:
+                next_attempt_at = min(next_attempt_at, fetched_at + _CODEX_RESET_CARDS_REFRESH_INTERVAL)
+        except (TypeError, ValueError, OverflowError):
+            pass
     if now_epoch < next_attempt_at:
         return cached
 
@@ -3749,12 +3747,7 @@ def fetch_codex_reset_cards(now_epoch=None):
         else:
             state["last_error"] = "request"
         state["last_attempt_at"] = now_epoch
-        retry_interval = (
-            _CODEX_RESET_CARDS_REFRESH_INTERVAL
-            if status in (404, 410)
-            else _CODEX_RESET_CARDS_RETRY_INTERVAL
-        )
-        state["next_attempt_at"] = now_epoch + retry_interval
+        state["next_attempt_at"] = now_epoch + _CODEX_RESET_CARDS_RETRY_INTERVAL
         _save_codex_reset_cards_state(state)
         return cached
 
