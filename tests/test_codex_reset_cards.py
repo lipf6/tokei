@@ -251,7 +251,7 @@ class CodexResetCardsTests(unittest.TestCase):
         state = json.loads(self.cache_path.read_text())
         self.assertEqual(
             state["next_attempt_at"],
-            now + USAGE._CODEX_RESET_CARDS_RETRY_INTERVAL,
+            now + USAGE._CODEX_RESET_CARDS_REFRESH_INTERVAL,
         )
 
     def test_failed_refresh_after_stale_success_honors_retry_deadline(self):
@@ -261,6 +261,32 @@ class CodexResetCardsTests(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")) as opener:
             self.assertEqual(USAGE.fetch_codex_reset_cards(now + 3601), first)
             self.assertEqual(USAGE.fetch_codex_reset_cards(now + 3661), first)
+            opener.assert_called_once()
+
+    def test_upgrade_retries_one_hour_after_failure_and_drops_unavailable_card(self):
+        now = 1_785_000_000
+        expiries = [now + 86400 * days for days in (1, 2, 3, 4)]
+        context = USAGE._codex_auth_context(json.loads(self.auth_path.read_text()))
+        self.cache_path.write_text(json.dumps({
+            "version": USAGE._CODEX_RESET_CARDS_CACHE_VERSION,
+            "account_key": context["account_key"],
+            "auth_key": context["auth_key"],
+            "fetched_at": now - 3600,
+            "cards": {"count": 4, "expires": expiries, "updated": now - 3600},
+            "last_error": "request",
+            "last_attempt_at": now,
+            "next_attempt_at": now + 6 * 3600,
+        }))
+        response = {"availableCount": 3, "credits": [
+            {"status": "available", "expiresAt": expiry} for expiry in expiries[1:]
+        ]}
+        with mock.patch("urllib.request.urlopen", return_value=_Response(response)) as opener:
+            cached = USAGE.fetch_codex_reset_cards(now + 3599)
+            self.assertEqual((cached["count"], cached["updated"]), (4, now - 3600))
+            opener.assert_not_called()
+            self.assertEqual(USAGE.fetch_codex_reset_cards(now + 3600), {
+                "count": 3, "expires": expiries[1:], "updated": now + 3600,
+            })
             opener.assert_called_once()
 
     def test_expired_cached_card_is_hidden_during_failure(self):
@@ -314,7 +340,7 @@ class CodexResetCardsTests(unittest.TestCase):
         self.assertEqual(state["last_error"], "auth")
         self.assertEqual(
             state["next_attempt_at"],
-            now + USAGE._CODEX_RESET_CARDS_RETRY_INTERVAL,
+            now + USAGE._CODEX_RESET_CARDS_REFRESH_INTERVAL,
         )
 
     def test_changed_token_retries_immediately_after_auth_failure(self):
@@ -325,7 +351,7 @@ class CodexResetCardsTests(unittest.TestCase):
             "account_key": old_context["account_key"],
             "auth_key": old_context["auth_key"],
             "last_error": "auth",
-            "next_attempt_at": now + USAGE._CODEX_RESET_CARDS_RETRY_INTERVAL,
+            "next_attempt_at": now + USAGE._CODEX_RESET_CARDS_REFRESH_INTERVAL,
         }))
         self.auth_path.write_text(json.dumps({
             "tokens": {
@@ -391,7 +417,7 @@ class CodexResetCardsTests(unittest.TestCase):
         state = json.loads(self.cache_path.read_text())
         self.assertEqual(
             state["next_attempt_at"],
-            now + USAGE._CODEX_RESET_CARDS_RETRY_INTERVAL,
+            now + USAGE._CODEX_RESET_CARDS_REFRESH_INTERVAL,
         )
 
 

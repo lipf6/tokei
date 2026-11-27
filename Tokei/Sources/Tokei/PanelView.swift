@@ -939,6 +939,11 @@ struct PanelView: View {
                             .foregroundStyle(Theme.tTertiary)
                     }
                 }
+                if let updated = cards.updated {
+                    Text(L("更新于 %@", Fmt.localTime(updated)))
+                        .font(.system(size: Theme.fontSize(9), design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                }
             }
             .padding(9)
             .background(
